@@ -7,6 +7,89 @@ The Pi userspace runs unchanged on QEMU's `virt` machine (Cortex-A53, 4 cores,
 kernel has no virtio drivers. Pi/HAT hardware (SPI, I2C, GPIO, RP2040, ATtiny)
 is not emulated.
 
+## Architecture
+
+Running (`make up`). Dashed parts are the real tc2-agent (`TC2_AGENT=real`);
+otherwise the `tc2-emu-agent` stand-in serves tc2-agent's D-Bus interface.
+
+```mermaid
+flowchart TB
+    subgraph host["Docker host: Linux, or macOS with Docker Desktop"]
+        api["Local Cacophony API :1080"]
+        tests["make e2e: tc2-emu-e2e tests"]
+        dev["make ssh / logs / console<br/>browser :8080, curl :9000"]
+        images[("images/<br/>base.qcow2, vmlinuz, initrd")]
+        build[("build/<br/>guest + host binaries")]
+    end
+
+    subgraph container["tc2 container"]
+        inbound["socat :2222 :8080"]
+        apirelay["socat 127.0.0.1:1080 → TC2_API"]
+        hw["tc2-emu-hw<br/>ATtiny, RTC, AHT20, EEPROM<br/>control API :9000"]
+        rp2040["tc2-emu-rp2040<br/>scripted RP2040"]
+        state[("/state volume<br/>run.qcow2, journal.log")]
+
+        subgraph qemu["QEMU virt: Cortex-A53 x4, 512M, TCG"]
+            subgraph guest["Guest: TC2 image, Debian arm64 kernel"]
+                mgmt["managementd :80"]
+                ssh["sshd :22"]
+                reg["device-register"]
+                uploader["thermal-uploader"]
+                launcher["tc2-agent-launcher"]
+                emuagent["tc2-emu-agent"]
+                agent["tc2-agent --rp2040-link"]
+                recorder["thermal-recorder-py"]
+                hat["tc2-hat-attiny (patched)<br/>tc2-hat-rtc, tc2-hat-temp"]
+                i2c["tc2-emu-i2c<br/>in place of tc2-hat-i2c"]
+                gpio["gpio-mockup GPIO0-27"]
+                journal["tc2-emu-journal"]
+                fakenet["dnsmasq + dummy uplink<br/>fake internet"]
+            end
+        end
+    end
+
+    dev --> inbound
+    dev --> hw
+    tests -->|"HTTP via host.docker.internal"| inbound
+    tests --> api
+    inbound -->|"QEMU hostfwd"| mgmt
+    inbound -->|"QEMU hostfwd"| ssh
+
+    reg -->|"192.168.1.1:1080"| apirelay
+    uploader -->|"192.168.1.1:1080"| apirelay
+    apirelay --> api
+
+    mgmt -->|"D-Bus org.cacophony.TC2Agent"| launcher
+    launcher --> emuagent
+    launcher -.-> agent
+    emuagent -->|"fixture CPTV to /var/spool/cptv"| uploader
+    agent -.->|"frame socket"| recorder
+    agent <-.->|"virtio-serial ...tc2-emu.rp2040"| rp2040
+
+    hat -->|"D-Bus org.cacophony.i2c"| i2c
+    i2c <-->|"virtio-serial ...tc2-emu.hw, JSON lines"| hw
+    hat --- gpio
+
+    journal -->|"virtio-serial ...tc2-emu.journal"| state
+    images -->|"backing file"| state
+    build -->|"9p share /opt/tc2-emu"| launcher
+    build -->|"build/host"| hw
+```
+
+Building:
+
+```mermaid
+flowchart LR
+    sd["TC2 SD card image"] --> image["make image<br/>prepare-image.sh, guest-setup.sh<br/>privileged builder container"]
+    image --> images[("images/")]
+
+    crates["crates/ Rust workspace"] --> stubs["make stubs<br/>stubs-builder container"]
+    agentsrc["tc2-agent 812f7b1<br/>+ guest/patches"] --> stubs
+    hatsrc["tc2-hat-controller v0.25.0<br/>+ guest/patches"] --> stubs
+    fixtures["fixtures/*.cptv<br/>fetched, not committed"] --> stubs
+    stubs --> build[("build/guest: aarch64, shared over 9p<br/>build/host: Docker host's arch")]
+```
+
 ## Usage
 
 ```sh
