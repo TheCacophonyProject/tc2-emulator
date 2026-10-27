@@ -12,6 +12,13 @@ use tc2_emu_e2e::{Managementd, TEST_RECORDING_READY, User, test_name, wait_for};
 #[ignore = "needs a running emulator and API; run with `make e2e`"]
 fn new_device_setup() -> anyhow::Result<()> {
     let device = Managementd::new();
+    let user = User::create()?;
+
+    // A fresh API database may not have the `new` group yet. device-register
+    // keeps retrying until it can register, so create it now if absent.
+    if user.ensure_group("new")? {
+        println!("Created the new group");
+    }
 
     // The emulated device registers itself into `new` on first boot, then reboots.
     let registered = wait_for("device to register", Duration::from_secs(300), || {
@@ -20,7 +27,6 @@ fn new_device_setup() -> anyhow::Result<()> {
     assert_eq!(registered.groupname, "new");
     println!("Device registered as {registered:?}");
 
-    let user = User::create()?;
     let group = test_name("group");
     let group_id = user.create_group(&group)?;
     println!("Created user {} and group {group} ({group_id})", user.name);
@@ -42,8 +48,11 @@ fn new_device_setup() -> anyhow::Result<()> {
     println!("Moved device to {group} as {name} ({})", moved.device_id);
 
     // The user takes a test recording from the web UI or Sidekick.
+    // tc2-agent may still be starting after the device's post-registration reboot.
     let requested_at = Utc::now();
-    let reply = device.take_short_test_recording()?;
+    let reply = wait_for("tc2-agent to take a test recording", Duration::from_secs(60), || {
+        device.take_short_test_recording().map(Some)
+    })?;
     assert_eq!(reply, "Asked for a test recording");
     wait_for("test recording to finish", Duration::from_secs(60), || {
         let status = device.thermal_status()?;

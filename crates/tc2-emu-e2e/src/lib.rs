@@ -121,6 +121,27 @@ impl User {
         response["groupId"].as_u64().context("no groupId in response")
     }
 
+    /// Creates group `name` if no one has, returning whether it did. Groups can
+    /// only be looked up by their members, so this tries to create it.
+    pub fn ensure_group(&self, name: &str) -> anyhow::Result<bool> {
+        let response = self
+            .client
+            .post(format!("{}/api/v1/groups", api_url()))
+            .header("Authorization", &self.token)
+            .json(&json!({ "groupName": name }))
+            .send()?;
+        let status = response.status();
+        let body = response.text()?;
+        let in_use = serde_json::from_str::<Value>(&body).unwrap_or_default()["messages"]
+            .as_array()
+            .is_some_and(|messages| messages.iter().any(|m| m == "Group name in use"));
+        match status.as_u16() {
+            200..=299 => Ok(true),
+            422 if in_use => Ok(false),
+            _ => bail!("creating group {name}: {status}: {body}"),
+        }
+    }
+
     pub fn group_devices(&self, group: &str) -> anyhow::Result<Vec<ApiDevice>> {
         #[derive(Deserialize)]
         struct Devices {
