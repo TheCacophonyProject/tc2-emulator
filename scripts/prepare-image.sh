@@ -81,8 +81,14 @@ cp "$OUT/id_ed25519.pub" "$MNT/tmp/tc2-emu.pub"
 log "Configuring guest"
 chroot "$MNT" /bin/bash /tmp/guest-setup.sh
 
-rm -rf "$MNT/tmp/guest-setup.sh" "$MNT/tmp/tc2-emu.pub" "$MNT/tmp/tc2-emu-guest" "$MNT/usr/sbin/policy-rc.d" "$MNT/etc/resolv.conf"
-mv "$MNT/etc/resolv.conf.tc2-emu" "$MNT/etc/resolv.conf" 2>/dev/null || true
+rm -rf "$MNT/tmp/guest-setup.sh" "$MNT/tmp/tc2-emu.pub" "$MNT/tmp/tc2-emu-guest" "$MNT/usr/sbin/policy-rc.d"
+# Put the guest's resolv.conf back, unless guest-setup.sh replaced it.
+if cmp -s /etc/resolv.conf "$MNT/etc/resolv.conf"; then
+    rm -f "$MNT/etc/resolv.conf"
+    mv "$MNT/etc/resolv.conf.tc2-emu" "$MNT/etc/resolv.conf" 2>/dev/null || true
+else
+    rm -f "$MNT/etc/resolv.conf.tc2-emu"
+fi
 
 log "Extracting kernel"
 KVER=$(ls "$MNT/lib/modules" | grep -E -- '-arm64$' | sort -V | tail -n1)

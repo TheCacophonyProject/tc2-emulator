@@ -1542,6 +1542,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tc2-emu-dns"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "env_logger",
+ "log",
+]
+
+[[package]]
 name = "tc2-emu-e2e"
 version = "0.1.0"
 dependencies = [

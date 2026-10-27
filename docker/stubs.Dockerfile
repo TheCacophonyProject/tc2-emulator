@@ -4,7 +4,10 @@
 # aarch64-linux-gnu-gcc, so the cross toolchain is only needed elsewhere.
 FROM rust:1.90-bookworm
 
-RUN rustup target add aarch64-unknown-linux-musl "$(uname -m)-unknown-linux-musl" \
+# Everything rust-toolchain.toml asks for, so rustup doesn't download what's
+# missing in every (throwaway) container.
+RUN rustup component add rustfmt \
+    && rustup target add aarch64-unknown-linux-musl x86_64-unknown-linux-musl \
     && if [ "$(dpkg --print-architecture)" != arm64 ]; then \
         apt-get update \
         && apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu libc6-dev-arm64-cross \

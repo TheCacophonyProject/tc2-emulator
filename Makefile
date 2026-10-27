@@ -22,7 +22,7 @@ $(IMAGES)/base.qcow2: $(SRC_IMG) $(IMAGES)/id_ed25519 scripts/prepare-image.sh s
 # dir and cargo home, so they don't mix with host builds. `install` replaces the
 # binaries rather than overwriting them, so this works while the emulator is
 # running them; it runs in Docker too, since macOS's lacks -D and -t.
-GUEST_BINS := tc2-emu-i2c tc2-emu-agent
+GUEST_BINS := tc2-emu-i2c tc2-emu-agent tc2-emu-dns
 HOST_BINS  := tc2-emu-hw tc2-emu-rp2040
 GUEST_TARGET := aarch64-unknown-linux-musl
 HOST_TARGET   = $(shell docker info --format '{{.Architecture}}')-unknown-linux-musl

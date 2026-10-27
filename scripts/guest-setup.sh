@@ -118,6 +118,9 @@ fi
 # real, but services wait for connrequester (modemd) to see the internet: a
 # ping to 8.8.8.8/8.8.4.4 and a DNS lookup of google.com. Answer both locally,
 # resolving every name to the host side, where only the test API is reachable.
+# tc2-emu-dns answers DNS rather than dnsmasq, which forwards AAAA queries to
+# the image's unreachable upstream servers, so each lookup took 20s; dnsmasq is
+# left with DHCP for the hotspot. prepare-image.sh keeps this resolv.conf.
 cat > /usr/local/sbin/tc2-emu-uplink <<'EOF'
 #!/bin/sh
 set -e
@@ -141,10 +144,25 @@ ExecStart=/usr/local/sbin/tc2-emu-uplink
 WantedBy=multi-user.target
 EOF
 systemctl enable tc2-emu-uplink.service
-cat > /etc/dnsmasq.d/tc2-emu.conf <<EOF
-no-resolv
-address=/#/$HOST_IP
+cat > /etc/systemd/system/tc2-emu-dns.service <<EOF
+[Unit]
+Description=Emulator: fake DNS, resolving every name to $HOST_IP
+RequiresMountsFor=$EMU_DIR
+Before=nss-lookup.target network-online.target
+Wants=nss-lookup.target
+
+[Service]
+ExecStart=$EMU_DIR/guest/tc2-emu-dns --address $HOST_IP
+DynamicUser=yes
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target
 EOF
+systemctl enable tc2-emu-dns.service
+echo 'port=0' > /etc/dnsmasq.d/tc2-emu.conf
 printf '[main]\ndns=none\n' > /etc/NetworkManager/conf.d/tc2-emu.conf
 rm -f /etc/resolv.conf
 echo 'nameserver 127.0.0.1' > /etc/resolv.conf

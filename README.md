@@ -43,7 +43,7 @@ flowchart TB
                 i2c["tc2-emu-i2c<br/>in place of tc2-hat-i2c"]
                 gpio["gpio-mockup GPIO0-27"]
                 journal["tc2-emu-journal"]
-                fakenet["dnsmasq + dummy uplink<br/>fake internet"]
+                fakenet["tc2-emu-dns + dummy uplink<br/>fake internet"]
             end
         end
     end
@@ -150,7 +150,10 @@ no route to the internet, so it can't reach production servers.
 
 Services wait until modemd's connection check passes (ping 8.8.8.8/8.8.4.4 and
 resolve google.com). The emulator answers it locally: a dummy interface holds
-those addresses and the guest's dnsmasq resolves every name to `192.168.1.1`.
+those addresses, and `tc2-emu-dns` (from `crates/`, in place of dnsmasq's DNS)
+resolves every name to `192.168.1.1`. It answers other record types, AAAA
+included, with no records straight away; dnsmasq forwarded those to unreachable
+upstream servers, so every check waited 20s for them to time out.
 
 ## Registration
 
