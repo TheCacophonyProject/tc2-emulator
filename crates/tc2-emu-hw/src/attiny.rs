@@ -35,12 +35,7 @@ pub mod reg {
 }
 
 const REGISTER_COUNT: usize = 0x30;
-const READ_ONLY: [u8; 4] = [
-    reg::TYPE,
-    reg::MAJOR_VERSION,
-    reg::MINOR_VERSION,
-    reg::PATCH_VERSION,
-];
+const READ_ONLY: [u8; 4] = [reg::TYPE, reg::MAJOR_VERSION, reg::MINOR_VERSION, reg::PATCH_VERSION];
 /// Writing this bit to the first register of a battery pair starts an analog
 /// reading; the ATtiny clears it when the reading is ready.
 const ANALOG_START: u8 = 1 << 7;
@@ -186,9 +181,7 @@ impl Attiny {
         }
         match *payload {
             [register] => {
-                let len = read_len
-                    .checked_sub(2)
-                    .ok_or("ATtiny read must include 2 CRC bytes")?;
+                let len = read_len.checked_sub(2).ok_or("ATtiny read must include 2 CRC bytes")?;
                 let mut response = self.read(register, len);
                 let crc = crc16(&response);
                 response.extend(crc.to_be_bytes());
@@ -203,9 +196,7 @@ impl Attiny {
     }
 
     fn read(&self, register: u8, len: usize) -> Vec<u8> {
-        (0..len)
-            .map(|i| self.regs.get(register as usize + i).copied().unwrap_or(0))
-            .collect()
+        (0..len).map(|i| self.regs.get(register as usize + i).copied().unwrap_or(0)).collect()
     }
 
     fn write(&mut self, register: u8, value: u8) {

@@ -51,7 +51,9 @@ impl Aht20 {
     pub fn tx(&mut self, write: &[u8], read_len: usize) -> Result<Vec<u8>, String> {
         match write.first() {
             // Status/measurement read; the presence check reads 1 byte of it.
-            Some(&STATUS_REG) | Some(0x00) => Ok(self.measurement().into_iter().take(read_len).collect()),
+            Some(&STATUS_REG) | Some(0x00) => {
+                Ok(self.measurement().into_iter().take(read_len).collect())
+            }
             // Trigger measurement (AC 33 00) or calibrate (BE 08 00).
             Some(0xAC) | Some(0xBE) => Ok(vec![0; read_len]),
             _ => Err(format!("unexpected AHT20 request {write:02x?}")),

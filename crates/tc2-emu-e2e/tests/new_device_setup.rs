@@ -29,7 +29,10 @@ fn new_device_setup() -> anyhow::Result<()> {
     let name = test_name("device");
     device.reregister_authorized(&user, &group, &name)?;
     let moved = device.device_info()?;
-    assert_eq!((moved.groupname.as_str(), moved.devicename.as_str()), (group.as_str(), name.as_str()));
+    assert_eq!(
+        (moved.groupname.as_str(), moved.devicename.as_str()),
+        (group.as_str(), name.as_str())
+    );
     assert_ne!(moved.device_id, registered.device_id, "reregistering makes a new device");
     let api_devices = user.group_devices(&group)?;
     assert!(
@@ -51,10 +54,8 @@ fn new_device_setup() -> anyhow::Result<()> {
         Ok(user.thermal_recordings(group_id, moved.device_id)?.into_iter().next())
     })?;
     println!("Recording on the API: {recording:#}");
-    let recorded_at: DateTime<Utc> = recording["recordingDateTime"]
-        .as_str()
-        .expect("recordingDateTime")
-        .parse()?;
+    let recorded_at: DateTime<Utc> =
+        recording["recordingDateTime"].as_str().expect("recordingDateTime").parse()?;
     assert!(
         recorded_at >= requested_at - chrono::TimeDelta::seconds(5),
         "recording from {recorded_at} predates the request at {requested_at}"

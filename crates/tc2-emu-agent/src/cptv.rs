@@ -30,9 +30,7 @@ pub struct HeaderUpdate<'a> {
 
 pub fn rewrite_header(cptv: &[u8], update: &HeaderUpdate) -> anyhow::Result<Vec<u8>> {
     let mut raw = Vec::new();
-    MultiGzDecoder::new(cptv)
-        .read_to_end(&mut raw)
-        .context("decompressing CPTV")?;
+    MultiGzDecoder::new(cptv).read_to_end(&mut raw).context("decompressing CPTV")?;
     ensure!(raw.len() > MAGIC.len() && raw.starts_with(MAGIC), "not a CPTV v2 file");
 
     let mut fields = Vec::new();

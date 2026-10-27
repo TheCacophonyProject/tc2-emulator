@@ -28,12 +28,7 @@ mod tests {
 
     #[test]
     fn request_wire_format() {
-        let req = Request {
-            id: 7,
-            address: 0x25,
-            write: vec![0x00],
-            read_len: 1,
-        };
+        let req = Request { id: 7, address: 0x25, write: vec![0x00], read_len: 1 };
         assert_eq!(
             serde_json::to_string(&req).unwrap(),
             r#"{"id":7,"address":37,"write":[0],"read_len":1}"#

@@ -94,15 +94,14 @@ impl User {
     pub fn create() -> anyhow::Result<Self> {
         let name = test_name("user");
         let client = client();
-        let user: LoggedInUser = send_json(client.post(format!("{}/api/v1/users", api_url())).json(
-            &json!({
+        let user: LoggedInUser =
+            send_json(client.post(format!("{}/api/v1/users", api_url())).json(&json!({
                 "userName": name,
                 "password": "password",
                 "email": format!("{name}@email.com"),
                 "endUserAgreement": 3,
-            }),
-        ))
-        .context("registering user")?;
+            })))
+            .context("registering user")?;
         Ok(User { name, id: user.user_data.id, token: user.token, client })
     }
 
@@ -133,17 +132,15 @@ impl User {
 
     /// Thermal recordings of any length from `device_id` in a group, newest first.
     pub fn thermal_recordings(&self, group_id: u64, device_id: u64) -> anyhow::Result<Vec<Value>> {
-        let response: Value = send_json(
-            self.get(&format!("/api/v1/recordings/for-project/{group_id}"))
-                .query(&[
-                    ("types", "thermal"),
-                    ("devices", &device_id.to_string()),
-                    ("include-false-positives", "true"),
-                    // Without this the API applies a minimum duration. Not
-                    // `status-recordings`, which means only those under 2.5s.
-                    ("duration", "0"),
-                ]),
-        )?;
+        let response: Value =
+            send_json(self.get(&format!("/api/v1/recordings/for-project/{group_id}")).query(&[
+                ("types", "thermal"),
+                ("devices", &device_id.to_string()),
+                ("include-false-positives", "true"),
+                // Without this the API applies a minimum duration. Not
+                // `status-recordings`, which means only those under 2.5s.
+                ("duration", "0"),
+            ]))?;
         Ok(response["recordings"].as_array().cloned().unwrap_or_default())
     }
 }
@@ -198,7 +195,12 @@ impl Managementd {
     }
 
     /// Moves and/or renames the device, authorized by `user`, as Sidekick does.
-    pub fn reregister_authorized(&self, user: &User, group: &str, name: &str) -> anyhow::Result<()> {
+    pub fn reregister_authorized(
+        &self,
+        user: &User,
+        group: &str,
+        name: &str,
+    ) -> anyhow::Result<()> {
         self.send(self.request(reqwest::Method::POST, "/reregister-authorized").json(&json!({
             "newGroup": group,
             "newName": name,

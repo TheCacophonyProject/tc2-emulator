@@ -55,10 +55,7 @@ impl Bridge {
         let mut line = serde_json::to_vec(&Request { id, address, write, read_len })
             .map_err(|e| e.to_string())?;
         line.push(b'\n');
-        inner
-            .port
-            .write_all(&line)
-            .map_err(|e| format!("writing to {PORT_NAME}: {e}"))?;
+        inner.port.write_all(&line).map_err(|e| format!("writing to {PORT_NAME}: {e}"))?;
 
         // Skip responses to earlier requests that timed out.
         let deadline = Instant::now() + timeout;

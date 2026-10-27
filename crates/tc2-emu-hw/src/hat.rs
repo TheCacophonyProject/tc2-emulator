@@ -36,7 +36,12 @@ impl Hat {
     }
 
     /// Errors are reported to the guest like a failed transaction on a real bus.
-    pub fn i2c_tx(&mut self, address: u8, write: &[u8], read_len: usize) -> Result<Vec<u8>, String> {
+    pub fn i2c_tx(
+        &mut self,
+        address: u8,
+        write: &[u8],
+        read_len: usize,
+    ) -> Result<Vec<u8>, String> {
         match address {
             attiny::ADDRESS => self.attiny.tx(write, read_len),
             pcf8563::ADDRESS => self.rtc.tx(write, read_len),
