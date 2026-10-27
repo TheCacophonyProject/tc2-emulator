@@ -63,6 +63,8 @@ exec qemu-system-aarch64 \
     -device virtserialport,chardev=hw,name=org.cacophony.tc2-emu.hw \
     -chardev socket,id=rp2040,path="$STATE/rp2040.sock",server=on,wait=off \
     -device virtserialport,chardev=rp2040,name=org.cacophony.tc2-emu.rp2040 \
+    -chardev file,id=journal,path="$STATE/journal.log" \
+    -device virtserialport,chardev=journal,name=org.cacophony.tc2-emu.journal \
     -virtfs local,path="$EMU",mount_tag=tc2-emu,security_model=none,readonly=on \
     -display none -serial mon:stdio \
     -qmp unix:"$STATE/qmp.sock",server=on,wait=off

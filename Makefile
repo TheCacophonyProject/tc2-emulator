@@ -2,7 +2,7 @@ SRC_IMG ?= tc2-2026-02-03.img
 IMAGES  := images
 SSH     := ssh -i $(IMAGES)/id_ed25519 -p 2222 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR pi@localhost
 
-.PHONY: image stubs build run up down e2e ssh console clean
+.PHONY: image stubs build run up down e2e ssh console logs clean
 
 image: $(IMAGES)/base.qcow2
 
@@ -89,6 +89,11 @@ ssh:
 # Detach with ctrl-p ctrl-q.
 console:
 	docker compose attach tc2
+
+# The guest's journal for this run, from boot, following. Each guest boot starts
+# with a "-- Boot <id> --" line.
+logs:
+	docker compose exec tc2 tail -n +1 -F /state/journal.log
 
 clean:
 	rm -f $(IMAGES)/base.qcow2 $(IMAGES)/vmlinuz $(IMAGES)/initrd.img $(IMAGES)/work.img

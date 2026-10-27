@@ -15,6 +15,7 @@ make stubs    # build the tc2-emu-* binaries into build/ (also run by `make up`/
 make up       # boot in the background (or `make run` for the console in the foreground)
 make ssh      # ssh pi@ the guest using images/id_ed25519
 make console  # serial console; detach with ctrl-p ctrl-q
+make logs     # follow the guest's systemd journal
 make e2e      # fresh device + end-to-end tests against the API at localhost:1080
 make down
 ```
@@ -36,6 +37,10 @@ See `scripts/guest-setup.sh`. In short:
   disabled; add `tc2-emu.enable=<service>` to the kernel command line to enable one.
 - The first-boot rootfs expansion in `rc.local` is skipped.
 - Serial console autologin as `pi`, plus a test SSH key.
+- `tc2-emu-journal` streams the journal to the container over a virtio-serial
+  port, into `/state/journal.log` (the `tc2-state` volume). It's reset when the
+  container starts and covers each guest boot from the start, so it works without
+  SSH and keeps logs from a guest that hung or rebooted.
 
 ## Networking and the test API
 

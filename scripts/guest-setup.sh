@@ -172,6 +172,43 @@ ExecStart=
 ExecStart=/usr/local/bin/tc2-emu-device-register
 EOF
 
+# Stream this boot's journal to the container (/state/journal.log there) over a
+# virtio-serial port, so it's readable without SSH and survives guest hangs and
+# reboots. Starts as soon as the port appears and replays the boot so far. If it
+# restarts within a boot, it carries on from then rather than replaying again:
+# journalctl 252 doesn't save --cursor-file when stopped while following.
+cat > /usr/local/sbin/tc2-emu-journal <<'EOF'
+#!/bin/sh
+started=/run/tc2-emu-journal.started
+if [ -e $started ]; then
+    echo "-- Journal stream restarted --"
+    lines=0
+else
+    touch $started
+    echo "-- Boot $(cat /proc/sys/kernel/random/boot_id) --"
+    lines=all
+fi
+exec journalctl --boot --follow --lines=$lines --output=short-precise
+EOF
+chmod +x /usr/local/sbin/tc2-emu-journal
+cat > /etc/systemd/system/tc2-emu-journal.service <<'EOF'
+[Unit]
+Description=Emulator: stream the journal to the host
+DefaultDependencies=no
+BindsTo=dev-virtio\x2dports-org.cacophony.tc2\x2demu.journal.device
+After=dev-virtio\x2dports-org.cacophony.tc2\x2demu.journal.device systemd-journald.service
+
+[Service]
+ExecStart=/usr/local/sbin/tc2-emu-journal
+StandardOutput=file:/dev/virtio-ports/org.cacophony.tc2-emu.journal
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=dev-virtio\x2dports-org.cacophony.tc2\x2demu.journal.device
+EOF
+systemctl enable tc2-emu-journal.service
+
 # Autologin on the serial console.
 mkdir -p /etc/systemd/system/serial-getty@ttyAMA0.service.d
 cat > /etc/systemd/system/serial-getty@ttyAMA0.service.d/autologin.conf <<'EOF'
