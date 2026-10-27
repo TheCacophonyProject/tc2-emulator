@@ -1,0 +1,14 @@
+[package]
+name = "tc2-emu-i2c"
+description = "Stands in for tc2-hat-i2c in the guest, forwarding org.cacophony.i2c.Tx to tc2-emu-hw"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+tc2-emu-proto.workspace = true
+anyhow.workspace = true
+env_logger.workspace = true
+log.workspace = true
+serde_json.workspace = true
+zbus = "5"

@@ -1,0 +1,29 @@
+services:
+  tc2:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    image: tc2-emulator
+    ports:
+      - "2222:2222"  # ssh
+      - "8080:8080"  # management-interface
+      - "9000:9000"  # tc2-emu-hw control API
+    environment:
+      TC2_API: ${TC2_API:-host.docker.internal:1080}
+      TC2_GROUP: ${TC2_GROUP:-}
+      TC2_NAME: ${TC2_NAME:-}
+      TC2_PERSIST: ${TC2_PERSIST:-0}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./images:/images:ro
+      - ./build:/opt/tc2-emu:ro
+      - tc2-state:/state
+    # Reaps the socat port relays and forwards signals to QEMU.
+    init: true
+    # Lets `docker compose attach tc2` reach the serial console.
+    tty: true
+    stdin_open: true
+
+volumes:
+  tc2-state:

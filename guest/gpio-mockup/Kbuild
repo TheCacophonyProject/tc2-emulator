@@ -1,0 +1,5 @@
+# gpio-mockup from Linux v6.1.190, built out of tree because Debian's arm64
+# kernel has neither CONFIG_GPIO_MOCKUP nor the CONFIG_IRQ_SIM it depends on,
+# so irq_sim.c is compiled into the module too.
+obj-m := gpio-mockup.o
+gpio-mockup-y := gpio-mockup-main.o irq_sim.o
