@@ -1,0 +1,776 @@
+diff --git a/src/camera_transfer_state.rs b/src/camera_transfer_state.rs
+index aca3762..fc13656 100644
+--- a/src/camera_transfer_state.rs
++++ b/src/camera_transfer_state.rs
+@@ -12,6 +12,7 @@ use crate::program_rp2040::program_rp2040;
+ use crate::recording_state::RecordingMode;
+ use crate::save_audio::save_audio_file_to_disk;
+ use crate::save_cptv::save_cptv_file_to_disk;
++use crate::rp2040_link::TransferPort;
+ use crate::utils::u8_slice_as_u16_slice;
+ use crate::{AUDIO_SHEBANG, EXPECTED_RP2040_FIRMWARE_VERSION, FRAME_LENGTH, RecordingState};
+ use byteorder::{BigEndian, ByteOrder, LittleEndian};
+@@ -19,8 +20,6 @@ use chrono::{DateTime, Utc};
+ use chrono_tz::Tz::Pacific__Auckland;
+ use crc::{CRC_16_XMODEM, Crc};
+ use log::{error, info, warn};
+-use rppal::gpio::Trigger;
+-use rppal::spi::{BitOrder, Bus, Mode, Polarity, SlaveSelect, Spi};
+ use rustbus::connection::Timeout;
+ use rustbus::{DuplexConn, get_system_bus_path};
+ use std::ops::Not;
+@@ -86,7 +85,7 @@ impl TryFrom<u8> for ExtTransferMessage {
+ pub fn enter_camera_transfer_loop(
+     initial_config: DeviceConfig,
+     mut dbus_conn: DuplexConn,
+-    spi_speed_mhz: u32,
++    mut port: TransferPort,
+     device_config_change_channel_rx: Receiver<DeviceConfig>,
+     restart_rp2040_channel_tx: Sender<bool>,
+     sig_term: Arc<AtomicBool>,
+@@ -94,59 +93,6 @@ pub fn enter_camera_transfer_loop(
+     restart_rp2040_ack: Arc<AtomicBool>,
+     mut recording_state: RecordingState,
+ ) {
+-    let spi_speed = spi_speed_mhz * 1_000_000;
+-    // rPi3 can handle 12Mhz (@600Mhz), may need to back it off a little to have some slack.
+-    info!("Initialising SPI at {spi_speed_mhz}Mhz");
+-    let mut spi = match Spi::new(Bus::Spi0, SlaveSelect::Ss0, spi_speed, Mode::Mode3) {
+-        Ok(spi) => spi,
+-        Err(e) => {
+-            error!("Failed to get SPI0: {e}");
+-            process::exit(1);
+-        }
+-    };
+-    if spi.set_bits_per_word(8).is_err() {
+-        error!("Failed to set SPI bits per word");
+-        process::exit(1);
+-    };
+-    if spi.set_bit_order(BitOrder::MsbFirst).is_err() {
+-        error!("Failed to set SPI output bit order");
+-        process::exit(1);
+-    };
+-    if spi.set_ss_polarity(Polarity::ActiveLow).is_err() {
+-        error!("Failed to set SPI SS polarity");
+-        process::exit(1);
+-    }
+-    let gpio = match rppal::gpio::Gpio::new() {
+-        Err(e) => {
+-            error!("Failed to get GPIO: {e}");
+-            process::exit(1);
+-        }
+-        Ok(gpio) => gpio,
+-    };
+-    let mut pin = match gpio.get(7) {
+-        Ok(pin) => pin.into_input(),
+-        Err(e) => {
+-            error!(
+-                "Failed to get pi ping interrupt pin ({e}), \
+-        is 'dtoverlay=spi0-1cs,cs0_pin=8' set in your config.txt?"
+-            );
+-            process::exit(1);
+-        }
+-    };
+-    pin.clear_interrupt()
+-        .map_err(|e| {
+-            error!("Unable to clear pi ping interrupt pin: {e}");
+-            process::exit(1);
+-        })
+-        .unwrap();
+-
+-    // NOTE: `rppal` now has a `debounce` option here which may be worth exploring.
+-    pin.set_interrupt(Trigger::RisingEdge, None)
+-        .map_err(|e| {
+-            error!("Unable to set pi ping interrupt: {e}");
+-            process::exit(1);
+-        })
+-        .unwrap();
+     // 65K buffer that we won't fully use at the moment.
+     let mut raw_read_buffer = [0u8; 65535];
+     let mut got_first_frame = false;
+@@ -254,60 +200,8 @@ pub fn enter_camera_transfer_loop(
+                 restart_rp2040_ack.store(false, Ordering::Relaxed);
+             }
+         }
+-        let poll_result = pin.poll_interrupt(false, Some(Duration::from_millis(2000)));
+-        if let Ok(_pin_level) = poll_result
+-            && _pin_level.is_some()
+-        {
+-            {
+-                drop(pin);
+-                let output_pin = match gpio.get(7) {
+-                    Ok(pin) => pin.into_output_low(),
+-                    Err(e) => {
+-                        error!(
+-                            "Failed to get pi ping interrupt pin ({e}), \
+-        is 'dtoverlay=spi0-1cs,cs0_pin=8' set in your config.txt?"
+-                        );
+-                        process::exit(1);
+-                    }
+-                };
+-                drop(output_pin);
+-                pin = match gpio.get(7) {
+-                    Ok(pin) => pin.into_input(),
+-                    Err(e) => {
+-                        error!(
+-                            "Failed to get pi ping interrupt pin ({e}), \
+-        is 'dtoverlay=spi0-1cs,cs0_pin=8' set in your config.txt?"
+-                        );
+-                        process::exit(1);
+-                    }
+-                };
+-
+-                pin.clear_interrupt()
+-                    .map_err(|e| {
+-                        error!("Unable to clear pi ping interrupt pin: {e}");
+-                        process::exit(1);
+-                    })
+-                    .unwrap();
+-
+-                // this seems to happen when save_audio fails...
+-                let attempts = 100;
+-                for i in 0..attempts {
+-                    let res = pin.set_interrupt(Trigger::RisingEdge, None);
+-                    match res {
+-                        Ok(()) => break,
+-                        Err(e) => {
+-                            if i == attempts - 1 {
+-                                error!("Unable to set pi ping interrupt: {e}");
+-                                process::exit(1);
+-                            }
+-                            info!("Pin interrupts failed, trying again {e}");
+-                            sleep(Duration::from_millis(100));
+-                        }
+-                    }
+-                }
+-            }
+-
+-            spi.read(&mut raw_read_buffer[..2066]).unwrap();
++        if port.wait_for_transfer(Duration::from_millis(2000)) {
++            port.read(&mut raw_read_buffer[..2066]).unwrap();
+             {
+                 let header_slice = &raw_read_buffer[..header_length];
+                 let transfer_type = header_slice[0];
+@@ -348,7 +242,7 @@ pub fn enter_camera_transfer_loop(
+ 
+                     LittleEndian::write_u16(&mut return_payload_buf[4..6], 0);
+                     LittleEndian::write_u16(&mut return_payload_buf[6..8], 0);
+-                    spi.write(&return_payload_buf).unwrap();
++                    port.write(&return_payload_buf).unwrap();
+                     if process_interrupted(&sig_term, &mut dbus_conn) {
+                         break 'transfer;
+                     }
+@@ -358,7 +252,7 @@ pub fn enter_camera_transfer_loop(
+                     // warn!("zero-sized payload");
+                     LittleEndian::write_u16(&mut return_payload_buf[4..6], 0);
+                     LittleEndian::write_u16(&mut return_payload_buf[6..8], 0);
+-                    spi.write(&return_payload_buf).unwrap();
++                    port.write(&return_payload_buf).unwrap();
+                     if process_interrupted(&sig_term, &mut dbus_conn) {
+                         break 'transfer;
+                     }
+@@ -367,7 +261,7 @@ pub fn enter_camera_transfer_loop(
+                 if !(CAMERA_CONNECT_INFO..=CAMERA_STARTUP_HANDSHAKE).contains(&transfer_type) {
+                     LittleEndian::write_u16(&mut return_payload_buf[4..6], 0);
+                     LittleEndian::write_u16(&mut return_payload_buf[6..8], 0);
+-                    spi.write(&return_payload_buf).unwrap();
++                    port.write(&return_payload_buf).unwrap();
+ 
+                     // NOTE: We limit the frequency of this since it can
+                     //  spin in this state pretty aggressively.
+@@ -439,7 +333,7 @@ pub fn enter_camera_transfer_loop(
+                             .copy_from_slice(&piece_with_length);
+                     }
+                     // Always write the return buffer
+-                    spi.write(&return_payload_buf).unwrap();
++                    port.write(&return_payload_buf).unwrap();
+                     if crc == crc_from_remote {
+                         if is_file_transfer_progress_message {
+                             recording_state.update_offload_progress(transfer_block);
+@@ -462,6 +356,17 @@ pub fn enter_camera_transfer_loop(
+                                     num_events_to_offload,
+                                 );
+ 
++                                if firmware_version != EXPECTED_RP2040_FIRMWARE_VERSION
++                                    && port.is_emulated()
++                                {
++                                    exit_cleanly(&mut dbus_conn);
++                                    error!(
++                                        "Emulated RP2040 has firmware version \
++                                        {firmware_version}, expected \
++                                        {EXPECTED_RP2040_FIRMWARE_VERSION}"
++                                    );
++                                    process::exit(1);
++                                }
+                                 if firmware_version != EXPECTED_RP2040_FIRMWARE_VERSION {
+                                     exit_cleanly(&mut dbus_conn);
+                                     info!(
+@@ -832,7 +737,7 @@ pub fn enter_camera_transfer_loop(
+                         warn!("Crc check failed, remote was notified and will re-transmit");
+                     }
+                 } else {
+-                    spi.read(&mut raw_read_buffer[2066..num_bytes + header_length])
++                    port.read(&mut raw_read_buffer[2066..num_bytes + header_length])
+                         .map_err(|e| {
+                             error!("SPI read error: {e:?}");
+ 
+diff --git a/src/frame_socket_server.rs b/src/frame_socket_server.rs
+index 511118b..36d1581 100644
+--- a/src/frame_socket_server.rs
++++ b/src/frame_socket_server.rs
+@@ -1,11 +1,10 @@
+ use crate::camera_transfer_state::CameraHandshakeInfo;
+ use crate::cptv_frame_dispatch;
+-use crate::program_rp2040::program_rp2040;
+ use crate::recording_state::{RecordingMode, RecordingState};
+ use crate::socket_stream::{SocketStream, get_socket_address};
+ use crate::telemetry::{Telemetry, read_telemetry};
+ use log::{debug, error, info, warn};
+-use rppal::gpio::OutputPin;
++use crate::rp2040_link::Rp2040Control;
+ use std::sync::Arc;
+ use std::sync::atomic::{AtomicBool, Ordering};
+ use std::sync::mpsc::{Receiver, RecvTimeoutError};
+@@ -21,7 +20,7 @@ pub struct FrameSocketServerMessage {
+ 
+ fn restart_rp2040_if_requested(
+     restart_rp2040_channel_rx: &Receiver<bool>,
+-    run_pin: &mut OutputPin,
++    rp2040_control: &mut Rp2040Control,
+     restart_rp2040_ack: &mut Arc<AtomicBool>,
+ ) {
+     // FIXME: Check if the rp2040 recording flag is set before restarting.
+@@ -29,14 +28,7 @@ fn restart_rp2040_if_requested(
+     // Check if we need to reset rp2040 because of a config change
+     if restart_rp2040_channel_rx.try_recv().is_ok() {
+         restart_rp2040_ack.store(true, Ordering::Relaxed);
+-        info!("Restarting rp2040");
+-        if !run_pin.is_set_high() {
+-            run_pin.set_high();
+-            sleep(Duration::from_millis(1000));
+-        }
+-        run_pin.set_low();
+-        sleep(Duration::from_millis(1000));
+-        run_pin.set_high();
++        rp2040_control.restart();
+     }
+ }
+ 
+@@ -44,7 +36,7 @@ pub fn spawn_frame_socket_server_thread(
+     restart_rp2040_channel_rx: Receiver<bool>,
+     camera_handshake_channel_rx: Receiver<FrameSocketServerMessage>,
+     serve_frames_via_wifi: bool,
+-    mut run_pin: OutputPin,
++    mut rp2040_control: Rp2040Control,
+     mut restart_rp2040_ack: Arc<AtomicBool>,
+     recording_state: &RecordingState,
+ ) {
+@@ -71,7 +63,7 @@ pub fn spawn_frame_socket_server_thread(
+ 
+             restart_rp2040_if_requested(
+                 &restart_rp2040_channel_rx,
+-                &mut run_pin,
++                &mut rp2040_control,
+                 &mut restart_rp2040_ack,
+             );
+             let mut recv_timeout_ms = 10;
+@@ -80,7 +72,7 @@ pub fn spawn_frame_socket_server_thread(
+             loop {
+                 restart_rp2040_if_requested(
+                     &restart_rp2040_channel_rx,
+-                    &mut run_pin,
++                    &mut rp2040_control,
+                     &mut restart_rp2040_ack,
+                 );
+                 if recording_state.recording_mode() == RecordingMode::Thermal {
+@@ -112,6 +104,7 @@ pub fn spawn_frame_socket_server_thread(
+                     &mut prev_frame_num,
+                     &recording_state,
+                     &mut recv_timeout_ms,
++                    &mut rp2040_control,
+                 );
+             }
+         },
+@@ -126,6 +119,7 @@ fn handle_payload_from_frame_acquire_thread(
+     prev_frame_num: &mut Option<u32>,
+     recording_state: &RecordingState,
+     recv_timeout_ms: &mut u64,
++    rp2040_control: &mut Rp2040Control,
+ ) {
+     match result {
+         Ok(FrameSocketServerMessage {
+@@ -272,7 +266,7 @@ fn handle_payload_from_frame_acquire_thread(
+                         };
+                         if last_reprogram_over_1hr_ago {
+                             let _ = fs::remove_file(reprogram_file);
+-                            match program_rp2040() {
++                            match rp2040_control.program() {
+                                 Ok(()) => {
+                                     let now = SystemTime::now();
+                                     let timestamp_seconds = now
+diff --git a/src/main.rs b/src/main.rs
+index 3e78a2b..3097244 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -14,16 +14,15 @@ mod frame_socket_server;
+ mod mode_config;
+ mod program_rp2040;
+ mod recording_state;
++mod rp2040_link;
+ mod save_audio;
+ mod save_cptv;
+ mod socket_stream;
+ mod telemetry;
+ mod utils;
+ 
+-use rppal::gpio::Gpio;
+ 
+ use localzone::get_local_zone;
+-use std::fs;
+ use std::process;
+ use std::process::Command;
+ use std::sync::Arc;
+@@ -114,15 +113,13 @@ fn main() {
+         "\n=========\nStarting thermal camera 2 agent {VERSION}, run with --help to see options.\n"
+     );
+ 
+-    check_for_sufficient_free_disk_space();
+-    check_if_rp2040_needs_programming();
++    let startup_mode_config: ModeConfig = argh::from_env();
++    let serve_frames_via_wifi = startup_mode_config.use_wifi;
++    let spi_speed_mhz = startup_mode_config.spi_speed_mhz;
++    let rp2040_link = startup_mode_config.rp2040_link;
+ 
+-    let (serve_frames_via_wifi, spi_speed_mhz) = {
+-        let startup_mode_config: ModeConfig = argh::from_env();
+-        let serve_frames_via_wifi = startup_mode_config.use_wifi;
+-        let spi_speed = startup_mode_config.spi_speed_mhz;
+-        (serve_frames_via_wifi, spi_speed)
+-    };
++    check_for_sufficient_free_disk_space();
++    check_if_rp2040_needs_programming(rp2040_link.is_some());
+ 
+     let device_config = DeviceConfig::load_from_fs();
+     if device_config.is_err() {
+@@ -175,19 +172,8 @@ fn main() {
+                 "Thread must have permissions to run with realtime priority, run as root user"
+             );
+ 
+-            // For some reason when running periph.io host.ini function,
+-            // needed to use the I2C in the attiny-controller, it 'holds/exports' some of the
+-            // GPIO pins, so we manually 'release/unexport' them with the following.
+-            let gpio_number = "7";
+-            let _ = fs::write("/sys/class/gpio/unexport", gpio_number);
+-
+-            let gpio = Gpio::new().unwrap();
+-            let mut run_pin = gpio.get(23).unwrap().into_output_high();
+-            if !run_pin.is_set_high() {
+-                info!("Setting run pin high to enable rp2040");
+-                run_pin.set_high();
+-                sleep(Duration::from_millis(1000));
+-            }
++            let (transfer_port, rp2040_control) =
++                rp2040_link::open(rp2040_link.as_deref(), spi_speed_mhz);
+ 
+             let (camera_handshake_channel_tx, camera_handshake_channel_rx) = channel();
+             let (restart_rp2040_channel_tx, restart_rp2040_channel_rx) = channel();
+@@ -204,7 +190,7 @@ fn main() {
+                 restart_rp2040_channel_rx,
+                 camera_handshake_channel_rx,
+                 serve_frames_via_wifi,
+-                run_pin,
++                rp2040_control,
+                 restart_rp2040_ack.clone(),
+                 &recording_state,
+             );
+@@ -216,7 +202,7 @@ fn main() {
+             enter_camera_transfer_loop(
+                 initial_config,
+                 dbus_conn,
+-                spi_speed_mhz,
++                transfer_port,
+                 device_config_change_channel_rx,
+                 restart_rp2040_channel_tx,
+                 sig_term_state,
+diff --git a/src/mode_config.rs b/src/mode_config.rs
+index fcd79d4..3db193f 100644
+--- a/src/mode_config.rs
++++ b/src/mode_config.rs
+@@ -1,4 +1,5 @@
+ use argh::FromArgs;
++use std::path::PathBuf;
+ 
+ fn default_spi_speed_mhz() -> u32 {
+     12
+@@ -15,4 +16,8 @@ pub struct ModeConfig {
+     /// raspberry pi SPI speed in Mhz, defaults to 12
+     #[argh(option, default = "default_spi_speed_mhz()")]
+     pub(crate) spi_speed_mhz: u32,
++
++    /// talk to an emulated RP2040 over this socket or device instead of SPI and GPIO
++    #[argh(option)]
++    pub(crate) rp2040_link: Option<PathBuf>,
+ }
+diff --git a/src/program_rp2040.rs b/src/program_rp2040.rs
+index 355429c..6fdb2ac 100644
+--- a/src/program_rp2040.rs
++++ b/src/program_rp2040.rs
+@@ -71,12 +71,19 @@ pub fn program_rp2040() -> io::Result<()> {
+     Ok(())
+ }
+ 
+-pub fn check_if_rp2040_needs_programming() {
++pub fn check_if_rp2040_needs_programming(emulated_rp2040: bool) {
+     // Check if the file indicating that the RP2040 needs to be programmed.
+     // This is used to save time when setting up cameras
+     // so it will program the RP2040 instead of trying to connect first.
+     let program_rp2040_file = Path::new("/etc/cacophony/program_rp2040");
+-    if program_rp2040_file.exists() {
++    if program_rp2040_file.exists() && emulated_rp2040 {
++        // An emulated RP2040 always runs the expected firmware.
++        info!("Not programming emulated RP2040");
++        if let Err(e) = fs::remove_file(program_rp2040_file) {
++            error!("Failed to remove 'program_rp2040' file: {e}");
++            process::exit(1);
++        }
++    } else if program_rp2040_file.exists() {
+         println!("Program RP2040 because /etc/cacophony/program_rp2040 exists");
+         match program_rp2040() {
+             Ok(()) => match fs::remove_file(program_rp2040_file) {
+diff --git a/src/rp2040_link.rs b/src/rp2040_link.rs
+new file mode 100644
+index 0000000..ae1d391
+--- /dev/null
++++ b/src/rp2040_link.rs
+@@ -0,0 +1,331 @@
++//! How tc2-agent reaches the RP2040: over SPI and GPIO on a TC2, or over a socket
++//! to an emulated RP2040 (`--rp2040-link <path>`).
++//!
++//! The link is split in two, matching how it's used: the camera transfer loop
++//! owns the [`TransferPort`], and the frame socket thread owns the
++//! [`Rp2040Control`] used to restart or reprogram the RP2040.
++//!
++//! The emulated link mirrors the hardware, with tc2-agent as the SPI master.
++//! Each message is `[kind: u8][length: u32 LE][payload]`:
++//!
++//! - `PING` (RP2040 -> agent): the RP2040 has a transfer ready (GPIO7 rising edge).
++//! - `ACK` (agent -> RP2040): the agent pulled GPIO7 low to acknowledge the ping.
++//! - `READ` (agent -> RP2040): clock in `length` bytes; the payload is a u32 LE
++//!   byte count, answered with `DATA`.
++//! - `DATA` (RP2040 -> agent): the bytes clocked in.
++//! - `WRITE` (agent -> RP2040): bytes clocked out.
++//! - `RESTART` (agent -> RP2040): toggle the run pin to restart the RP2040.
++
++use crate::program_rp2040::program_rp2040;
++use log::{debug, error, info};
++use rppal::gpio::{Gpio, InputPin, OutputPin, Trigger};
++use rppal::spi::{BitOrder, Bus, Mode, Polarity, SlaveSelect, Spi};
++use std::fs::{File, OpenOptions};
++use std::io::{self, Read, Write};
++use std::path::Path;
++use std::sync::mpsc::{Receiver, RecvTimeoutError, channel};
++use std::sync::{Arc, Mutex};
++use std::thread::sleep;
++use std::time::{Duration, Instant};
++use std::{fs, process, thread};
++
++const PING: u8 = 1;
++const ACK: u8 = 2;
++const READ: u8 = 3;
++const DATA: u8 = 4;
++const WRITE: u8 = 5;
++const RESTART: u8 = 6;
++
++/// How long the emulated RP2040 has to answer a read.
++const READ_TIMEOUT: Duration = Duration::from_secs(5);
++
++/// Opens the link to the RP2040; `emulated` is the `--rp2040-link` path, if given.
++pub fn open(emulated: Option<&Path>, spi_speed_mhz: u32) -> (TransferPort, Rp2040Control) {
++    match emulated {
++        Some(path) => {
++            info!("Using emulated RP2040 at {}", path.display());
++            let link = SocketLink::open(path).unwrap_or_else(|e| {
++                error!("Failed to open emulated RP2040 link {}: {e}", path.display());
++                process::exit(1);
++            });
++            (TransferPort::Emulated(link.clone()), Rp2040Control::Emulated(link))
++        }
++        None => {
++            // For some reason when running periph.io host.ini function,
++            // needed to use the I2C in the attiny-controller, it 'holds/exports' some of the
++            // GPIO pins, so we manually 'release/unexport' them with the following.
++            let gpio_number = "7";
++            let _ = fs::write("/sys/class/gpio/unexport", gpio_number);
++
++            let gpio = Gpio::new().unwrap();
++            let mut run_pin = gpio.get(23).unwrap().into_output_high();
++            if !run_pin.is_set_high() {
++                info!("Setting run pin high to enable rp2040");
++                run_pin.set_high();
++                sleep(Duration::from_millis(1000));
++            }
++            (TransferPort::open_hardware(spi_speed_mhz), Rp2040Control::Hardware { run_pin })
++        }
++    }
++}
++
++pub enum TransferPort {
++    /// `ping_pin` is only `None` while it's briefly an output to acknowledge a ping.
++    Hardware { spi: Spi, gpio: Gpio, ping_pin: Option<InputPin> },
++    Emulated(SocketLink),
++}
++
++impl TransferPort {
++    fn open_hardware(spi_speed_mhz: u32) -> TransferPort {
++        let spi_speed = spi_speed_mhz * 1_000_000;
++        // rPi3 can handle 12Mhz (@600Mhz), may need to back it off a little to have some slack.
++        info!("Initialising SPI at {spi_speed_mhz}Mhz");
++        let spi = match Spi::new(Bus::Spi0, SlaveSelect::Ss0, spi_speed, Mode::Mode3) {
++            Ok(spi) => spi,
++            Err(e) => {
++                error!("Failed to get SPI0: {e}");
++                process::exit(1);
++            }
++        };
++        if spi.set_bits_per_word(8).is_err() {
++            error!("Failed to set SPI bits per word");
++            process::exit(1);
++        };
++        if spi.set_bit_order(BitOrder::MsbFirst).is_err() {
++            error!("Failed to set SPI output bit order");
++            process::exit(1);
++        };
++        if spi.set_ss_polarity(Polarity::ActiveLow).is_err() {
++            error!("Failed to set SPI SS polarity");
++            process::exit(1);
++        }
++        let gpio = match Gpio::new() {
++            Err(e) => {
++                error!("Failed to get GPIO: {e}");
++                process::exit(1);
++            }
++            Ok(gpio) => gpio,
++        };
++        let ping_pin = Some(get_ping_pin(&gpio));
++        TransferPort::Hardware { spi, gpio, ping_pin }
++    }
++
++    pub fn is_emulated(&self) -> bool {
++        matches!(self, TransferPort::Emulated(_))
++    }
++
++    /// Waits up to `timeout` for the RP2040 to signal that it has a transfer
++    /// ready, acknowledging it if so.
++    pub fn wait_for_transfer(&mut self, timeout: Duration) -> bool {
++        match self {
++            TransferPort::Hardware { gpio, ping_pin, .. } => {
++                let pin = ping_pin.as_mut().expect("ping pin is an input between transfers");
++                let poll_result = pin.poll_interrupt(false, Some(timeout));
++                if !matches!(poll_result, Ok(Some(_))) {
++                    return false;
++                }
++                // Briefly drive the ping pin low to acknowledge, then listen again.
++                drop(ping_pin.take());
++                let output_pin = match gpio.get(7) {
++                    Ok(pin) => pin.into_output_low(),
++                    Err(e) => {
++                        error!(
++                            "Failed to get pi ping interrupt pin ({e}), \
++        is 'dtoverlay=spi0-1cs,cs0_pin=8' set in your config.txt?"
++                        );
++                        process::exit(1);
++                    }
++                };
++                drop(output_pin);
++                *ping_pin = Some(get_ping_pin(gpio));
++                true
++            }
++            TransferPort::Emulated(link) => link.wait_for_ping(timeout).unwrap_or_else(|e| {
++                error!("Emulated RP2040 link failed: {e}");
++                process::exit(1);
++            }),
++        }
++    }
++
++    pub fn read(&mut self, buf: &mut [u8]) -> io::Result<()> {
++        match self {
++            TransferPort::Hardware { spi, .. } => spi.read(buf).map(|_| ()).map_err(io::Error::other),
++            TransferPort::Emulated(link) => link.read(buf),
++        }
++    }
++
++    pub fn write(&mut self, buf: &[u8]) -> io::Result<()> {
++        match self {
++            TransferPort::Hardware { spi, .. } => spi.write(buf).map(|_| ()).map_err(io::Error::other),
++            TransferPort::Emulated(link) => link.send(WRITE, buf),
++        }
++    }
++}
++
++/// Gets GPIO7 as an input that interrupts on the RP2040's ping.
++fn get_ping_pin(gpio: &Gpio) -> InputPin {
++    let mut pin = match gpio.get(7) {
++        Ok(pin) => pin.into_input(),
++        Err(e) => {
++            error!(
++                "Failed to get pi ping interrupt pin ({e}), \
++        is 'dtoverlay=spi0-1cs,cs0_pin=8' set in your config.txt?"
++            );
++            process::exit(1);
++        }
++    };
++    pin.clear_interrupt()
++        .map_err(|e| {
++            error!("Unable to clear pi ping interrupt pin: {e}");
++            process::exit(1);
++        })
++        .unwrap();
++
++    // NOTE: `rppal` now has a `debounce` option here which may be worth exploring.
++    // this seems to happen when save_audio fails...
++    let attempts = 100;
++    for i in 0..attempts {
++        match pin.set_interrupt(Trigger::RisingEdge, None) {
++            Ok(()) => break,
++            Err(e) => {
++                if i == attempts - 1 {
++                    error!("Unable to set pi ping interrupt: {e}");
++                    process::exit(1);
++                }
++                info!("Pin interrupts failed, trying again {e}");
++                sleep(Duration::from_millis(100));
++            }
++        }
++    }
++    pin
++}
++
++pub enum Rp2040Control {
++    Hardware { run_pin: OutputPin },
++    Emulated(SocketLink),
++}
++
++impl Rp2040Control {
++    pub fn restart(&mut self) {
++        info!("Restarting rp2040");
++        match self {
++            Rp2040Control::Hardware { run_pin } => {
++                if !run_pin.is_set_high() {
++                    run_pin.set_high();
++                    sleep(Duration::from_millis(1000));
++                }
++                run_pin.set_low();
++                sleep(Duration::from_millis(1000));
++                run_pin.set_high();
++            }
++            Rp2040Control::Emulated(link) => {
++                if let Err(e) = link.send(RESTART, &[]) {
++                    error!("Failed to restart emulated RP2040: {e}");
++                }
++            }
++        }
++    }
++
++    pub fn program(&mut self) -> io::Result<()> {
++        match self {
++            Rp2040Control::Hardware { .. } => program_rp2040(),
++            Rp2040Control::Emulated(_) => Err(io::Error::other("can't program an emulated RP2040")),
++        }
++    }
++}
++
++/// The emulated link. Clones share the connection: the transfer loop receives
++/// from it, and both halves send to it.
++#[derive(Clone)]
++pub struct SocketLink {
++    messages: Arc<Mutex<Receiver<io::Result<(u8, Vec<u8>)>>>>,
++    writer: Arc<Mutex<File>>,
++}
++
++impl SocketLink {
++    fn open(path: &Path) -> io::Result<SocketLink> {
++        let file = OpenOptions::new().read(true).write(true).open(path)?;
++        let mut reader = file.try_clone()?;
++        let (tx, rx) = channel();
++        // Read on a separate thread so waiting for a ping can time out.
++        thread::Builder::new().name("rp2040-link".to_string()).spawn(move || {
++            loop {
++                let message = read_message(&mut reader);
++                let failed = message.is_err();
++                if tx.send(message).is_err() || failed {
++                    break;
++                }
++            }
++        })?;
++        Ok(SocketLink { messages: Arc::new(Mutex::new(rx)), writer: Arc::new(Mutex::new(file)) })
++    }
++
++    fn send(&self, kind: u8, payload: &[u8]) -> io::Result<()> {
++        let mut message = Vec::with_capacity(5 + payload.len());
++        message.push(kind);
++        message.extend((payload.len() as u32).to_le_bytes());
++        message.extend(payload);
++        self.writer.lock().unwrap().write_all(&message)
++    }
++
++    fn receive(&self, timeout: Duration) -> io::Result<Option<(u8, Vec<u8>)>> {
++        match self.messages.lock().unwrap().recv_timeout(timeout) {
++            Ok(message) => message.map(Some),
++            Err(RecvTimeoutError::Timeout) => Ok(None),
++            Err(RecvTimeoutError::Disconnected) => {
++                Err(io::Error::other("emulated RP2040 link closed"))
++            }
++        }
++    }
++
++    /// Either side can restart independently, leaving stale messages behind, so
++    /// anything other than a ping is skipped.
++    fn wait_for_ping(&self, timeout: Duration) -> io::Result<bool> {
++        let deadline = Instant::now() + timeout;
++        loop {
++            let remaining = deadline.saturating_duration_since(Instant::now());
++            match self.receive(remaining)? {
++                None => return Ok(false),
++                Some((PING, _)) => {
++                    self.send(ACK, &[])?;
++                    return Ok(true);
++                }
++                Some((kind, _)) => debug!("Skipping message kind {kind} while waiting for a ping"),
++            }
++        }
++    }
++
++    fn read(&self, buf: &mut [u8]) -> io::Result<()> {
++        self.send(READ, &(buf.len() as u32).to_le_bytes())?;
++        loop {
++            match self.receive(READ_TIMEOUT)? {
++                Some((DATA, data)) if data.len() == buf.len() => {
++                    buf.copy_from_slice(&data);
++                    return Ok(());
++                }
++                Some((DATA, data)) => {
++                    return Err(io::Error::other(format!(
++                        "asked for {} bytes, got {}",
++                        buf.len(),
++                        data.len()
++                    )));
++                }
++                Some((kind, _)) => debug!("Skipping message kind {kind} while reading"),
++                None => {
++                    return Err(io::Error::other(format!(
++                        "no response from emulated RP2040 within {READ_TIMEOUT:?}"
++                    )));
++                }
++            }
++        }
++    }
++}
++
++fn read_message(reader: &mut File) -> io::Result<(u8, Vec<u8>)> {
++    let mut header = [0u8; 5];
++    reader.read_exact(&mut header)?;
++    let len = u32::from_le_bytes(header[1..5].try_into().unwrap()) as usize;
++    let mut payload = vec![0u8; len];
++    reader.read_exact(&mut payload)?;
++    Ok((header[0], payload))
++}

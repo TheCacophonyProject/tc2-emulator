@@ -1,0 +1,13 @@
+[package]
+name = "tc2-emu-rp2040"
+description = "Scripted stand-in for the RP2040, talking to tc2-agent over its emulated link"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+env_logger.workspace = true
+log.workspace = true
+clap = { version = "4", features = ["derive", "env"] }
+crc = "3"

@@ -15,6 +15,7 @@ make stubs    # build the tc2-emu-* binaries into build/ (also run by `make up`/
 make up       # boot in the background (or `make run` for the console in the foreground)
 make ssh      # ssh pi@ the guest using images/id_ed25519
 make console  # serial console; detach with ctrl-p ctrl-q
+make e2e      # fresh device + end-to-end tests against the API at localhost:1080
 make down
 ```
 
@@ -73,6 +74,13 @@ The Rust workspace in `crates/` stands in for the TC2 HAT:
   I2C bus through its `org.cacophony.i2c.Tx` D-Bus method, which it forwards to
   `tc2-emu-hw` over a virtio-serial port. The real `tc2-hat-attiny`, `tc2-hat-rtc`
   and `tc2-hat-temp` run unchanged on top.
+- `tc2-emu-agent` replaces `tc2-agent` until it can talk to an emulated RP2040. It
+  serves the `org.cacophony.TC2Agent` methods managementd uses, with tc2-agent's
+  replies and status codes. A test recording goes through tc2-agent's status
+  sequence, then saves `fixtures/cat-trigger.cptv` to `/var/spool/cptv` for
+  thermal-uploader, with its header rewritten to the current time, this device's
+  name and id, and the `test: true` motion config tc2-firmware writes for a
+  user-requested recording. Audio recordings and preview frames aren't emulated yet.
 
 Guest binaries are cross-compiled for `aarch64-unknown-linux-musl` and shared into
 the guest at `/opt/tc2-emu` over 9p, so changing a stub needs `make stubs` and a
@@ -93,4 +101,28 @@ period ends and nothing else has asked it to stay on.
 
 GPIO comes from `gpio-mockup` (see `guest/gpio-mockup/`): one chip at base 0, so
 `GPIO0`-`GPIO27` match the Pi's numbering. Inputs are set through
-`/sys/kernel/debug/gpio-mockup/gpiochip0/<line>`.
+`/sys/kernel/debug/gpio-mockup/gpiochip*/<line>` (the directory is `gpiochip1`, not
+the sysfs `gpiochip0`). For example, the ATtiny signals the Pi by pulling GPIO16 low.
+
+## Patched device software
+
+Fixes the emulator needs before they're upstream live in `guest/patches/`.
+`make stubs` builds the released version with them applied
+(`scripts/build-tc2-hat-controller.sh`), and the guest runs that build for the
+affected service only:
+
+- `tc2-hat-controller` v0.25.0, for `tc2-hat-attiny`: if GPIO16 can't be set up
+  with a pull-up, set it up without one rather than reading an unopened pin, which
+  always reads low and looks like a constant signal from the ATtiny. Off a real Pi,
+  periph's sysfs GPIO driver can't set pulls. Its version reports as `0.25.0+tc2-emu`.
+
+## End-to-end tests
+
+`crates/tc2-emu-e2e` drives the device the way a user does, against a local
+Cacophony API: it creates a user and group per test (as cacophony-web's e2e-tests
+do), then uses managementd's HTTP API as Sidekick or the web UI would.
+`new_device_setup` checks a new device registers into `new`, can be moved and
+renamed into the user's group, and that a test recording reaches the API.
+
+The tests are `#[ignore]`d so `cargo test` stays offline; `make e2e` starts a fresh
+emulator and runs them. Set `TC2_E2E_API` / `TC2_E2E_MANAGEMENTD` to point elsewhere.

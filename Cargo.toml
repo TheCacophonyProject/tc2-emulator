@@ -1,6 +1,8 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
+# Clones of other repos, built separately.
+exclude = ["upstream"]
 
 [workspace.package]
 version = "0.1.0"

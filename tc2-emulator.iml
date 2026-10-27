@@ -3,6 +3,9 @@
   <component name="NewModuleRootManager" inherit-compiler-output="true">
     <exclude-output />
     <content url="file://$MODULE_DIR$">
+      <sourceFolder url="file://$MODULE_DIR$/crates/tc2-emu-agent/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/tc2-emu-e2e/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/tc2-emu-e2e/tests" isTestSource="true" />
       <sourceFolder url="file://$MODULE_DIR$/crates/tc2-emu-hw/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/crates/tc2-emu-i2c/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/crates/tc2-emu-proto/src" isTestSource="false" />

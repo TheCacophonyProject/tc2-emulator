@@ -1,0 +1,25 @@
+diff --git a/internal/tc2-hat-attiny/main.go b/internal/tc2-hat-attiny/main.go
+index d418079..5eb1c25 100644
+--- a/internal/tc2-hat-attiny/main.go
++++ b/internal/tc2-hat-attiny/main.go
+@@ -253,9 +253,18 @@ func checkATtinySignalLoop(a *attiny) {
+ 	pinName := "GPIO16" //TODO add pin to config
+ 	pin := gpioreg.ByName(pinName)
+ 	if pin == nil {
+-		log.Printf("Failed to find {%s}", pinName)
++		log.Errorf("Failed to find %s, not listening for signals from the ATtiny", pinName)
++		return
++	}
++	if err := pin.In(gpio.PullUp, gpio.FallingEdge); err != nil {
++		// Some GPIO drivers, such as sysfs, can't set pulls, and leave the pin
++		// unopened so it always reads low. Fall back to configuring it without one.
++		log.Printf("Failed to set up %s with a pull-up (%v), retrying without", pinName, err)
++		if err := pin.In(gpio.PullNoChange, gpio.FallingEdge); err != nil {
++			log.Errorf("Failed to set up %s, not listening for signals from the ATtiny: %v", pinName, err)
++			return
++		}
+ 	}
+-	pin.In(gpio.PullUp, gpio.FallingEdge)
+ 	log.Println("Starting check ATtiny signal loop")
+ 	for {
+ 		pin.Read()

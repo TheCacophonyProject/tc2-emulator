@@ -82,16 +82,23 @@ systemctl enable tc2-emu-gpio-defaults.service
 mkdir -p "$EMU_DIR"
 echo "tc2-emu $EMU_DIR 9p trans=virtio,version=9p2000.L,ro,nofail 0 0" >> /etc/fstab
 
-# I2C goes to the emulated devices in tc2-emu-hw instead of a real bus.
-mkdir -p /etc/systemd/system/tc2-hat-i2c.service.d
-cat > /etc/systemd/system/tc2-hat-i2c.service.d/tc2-emu.conf <<EOF
+# Run stubs from the share in place of services that need hardware: I2C goes to
+# the emulated devices in tc2-emu-hw, and tc2-emu-agent fakes the RP2040 side of
+# tc2-agent. tc2-hat-attiny runs a build with guest/patches applied.
+replace_service() {
+    mkdir -p "/etc/systemd/system/$1.service.d"
+    cat > "/etc/systemd/system/$1.service.d/tc2-emu.conf" <<EOF
 [Unit]
 RequiresMountsFor=$EMU_DIR
 
 [Service]
 ExecStart=
-ExecStart=$EMU_DIR/guest/tc2-emu-i2c
+ExecStart=$EMU_DIR/guest/$2
 EOF
+}
+replace_service tc2-hat-i2c tc2-emu-i2c
+replace_service tc2-agent tc2-emu-agent
+replace_service tc2-hat-attiny "tc2-hat-controller attiny"
 
 for svc in "${DISABLED_SERVICES[@]}"; do
     mkdir -p "/etc/systemd/system/$svc.service.d"
