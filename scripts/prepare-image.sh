@@ -30,8 +30,11 @@ cleanup() {
 trap cleanup EXIT
 
 # Register qemu-aarch64 with the F flag so the interpreter is resolved now and
-# works inside the chroot. This is host-global and lasts until reboot.
+# works inside the chroot. This is host-global and lasts until reboot. Not on
+# an arm64 host (e.g. Docker Desktop on Apple silicon), which runs the chroot
+# natively, and where the handler would send every native binary through QEMU.
 ensure_binfmt() {
+    [[ $(uname -m) == aarch64 ]] && return
     local dir=/proc/sys/fs/binfmt_misc
     mountpoint -q "$dir" || mount -t binfmt_misc binfmt_misc "$dir"
     if [[ ! -e $dir/qemu-aarch64 ]]; then

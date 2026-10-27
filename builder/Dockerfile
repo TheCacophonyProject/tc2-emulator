@@ -1,5 +1,6 @@
 # Image preparation environment. Must be run with --privileged -v /dev:/dev
-# (loop devices + arm64 binfmt for chrooting into the Pi rootfs).
+# (loop devices, plus an arm64 binfmt handler for chrooting into the Pi rootfs
+# on non-arm64 hosts).
 FROM debian:bookworm-slim
 
 RUN apt-get update \

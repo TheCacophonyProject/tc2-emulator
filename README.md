@@ -26,7 +26,21 @@ Use a different source image with `make image SRC_IMG=path/to.img`.
   hardware control API: `http://localhost:9000`
 - Each run starts from a clean copy of `base.qcow2`. `TC2_PERSIST=1` keeps changes.
 - `make image` registers an arm64 binfmt handler on the host kernel if missing
-  (lasts until reboot).
+  (lasts until reboot). Arm64 hosts don't need one.
+
+## macOS (Apple silicon)
+
+Runs under Docker Desktop, where containers are arm64 Linux: the container's
+binaries (`build/host`) are built for the Docker host's architecture, and the
+guest is emulated with TCG as on Linux (no KVM either way). Not yet verified
+on a Mac:
+
+- `make image` needs privileged loop devices in Docker Desktop's VM. If that
+  fails, build `images/` on Linux and copy it over (it's architecture-independent;
+  keep `id_ed25519` with it).
+- Builds bind-mount the repo, which is slower than on Linux.
+- `make e2e` reaches the API and managementd at `host.docker.internal`, so the
+  local Cacophony API must be published on the Mac's port 1080.
 
 ## Guest changes made by `make image`
 
