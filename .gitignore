@@ -3,3 +3,4 @@ images/
 target/
 build/
 upstream/
+fixtures/*.cptv

@@ -81,6 +81,12 @@ The Rust workspace in `crates/` stands in for the TC2 HAT:
   thermal-uploader, with its header rewritten to the current time, this device's
   name and id, and the `test: true` motion config tc2-firmware writes for a
   user-requested recording. Audio recordings and preview frames aren't emulated yet.
+- With `TC2_AGENT=real`, the guest runs the real `tc2-agent` instead (built from
+  `main` with `guest/patches/tc2-agent`), talking to an emulated RP2040 over a
+  second virtio-serial port (`--rp2040-link`). For now that's `tc2-emu-rp2040`, a
+  scripted stand-in in the container: it makes the startup handshake (firmware 40),
+  then streams flat frames. It can't make recordings yet; tc2-firmware's simulation
+  will take its place.
 
 Guest binaries are cross-compiled for `aarch64-unknown-linux-musl` and shared into
 the guest at `/opt/tc2-emu` over 9p, so changing a stub needs `make stubs` and a
@@ -107,10 +113,12 @@ the sysfs `gpiochip0`). For example, the ATtiny signals the Pi by pulling GPIO16
 ## Patched device software
 
 Fixes the emulator needs before they're upstream live in `guest/patches/`.
-`make stubs` builds the released version with them applied
-(`scripts/build-tc2-hat-controller.sh`), and the guest runs that build for the
-affected service only:
+`make stubs` builds the upstream version with them applied, and the guest runs
+that build for the affected service only:
 
+- `tc2-agent` `main` (`scripts/build-tc2-agent.sh`): `--rp2040-link <path>` talks to
+  an emulated RP2040 over a socket instead of SPI and GPIO, and never programs it.
+  The socket protocol is described in the patch's `src/rp2040_link.rs`.
 - `tc2-hat-controller` v0.25.0, for `tc2-hat-attiny`: if GPIO16 can't be set up
   with a pull-up, set it up without one rather than reading an unopened pin, which
   always reads low and looks like a constant signal from the ATtiny. Off a real Pi,

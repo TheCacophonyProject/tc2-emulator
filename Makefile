@@ -21,7 +21,7 @@ $(IMAGES)/base.qcow2: $(SRC_IMG) $(IMAGES)/id_ed25519 scripts/prepare-image.sh s
 # home, so they don't mix with host builds. `install` replaces the binaries rather
 # than overwriting them, so this works while the emulator is running them.
 GUEST_BINS := tc2-emu-i2c tc2-emu-agent
-HOST_BINS  := tc2-emu-hw
+HOST_BINS  := tc2-emu-hw tc2-emu-rp2040
 CARGO_DOCKER := docker run --rm -u $(shell id -u):$(shell id -g) -v $(CURDIR):/src -w /src \
 	-e CARGO_HOME=/src/target/docker/cargo-home -e CARGO_TARGET_DIR=/src/target/docker \
 	tc2-emu-stubs-builder
@@ -33,6 +33,16 @@ stubs:
 	install -D -t build/guest $(addprefix target/docker/aarch64-unknown-linux-musl/release/,$(GUEST_BINS))
 	install -D -t build/host $(addprefix target/docker/x86_64-unknown-linux-musl/release/,$(HOST_BINS))
 	install -D -m 644 -t build/guest/fixtures fixtures/*.cptv
+	install -D -t build/guest guest/bin/*
+
+# Fixture recordings aren't committed, since recordings from real cameras carry
+# their location. tc2-emu-agent replaces it with a dummy one.
+# tc2-firmware commit to take fixtures from.
+FIXTURES_COMMIT := 300b2b99eb6e51eee1af57a603de23b599dd350a
+stubs: fixtures/cat-trigger.cptv
+fixtures/cat-trigger.cptv:
+	curl -sfL --create-dirs -o $@ \
+		https://raw.githubusercontent.com/TheCacophonyProject/tc2-firmware/$(FIXTURES_COMMIT)/test-fixtures/cat-trigger.cptv
 
 # tc2-agent main with guest/patches applied, until they're upstream. Uses the
 # Docker cargo home for crates, but its own target dir inside the clone.

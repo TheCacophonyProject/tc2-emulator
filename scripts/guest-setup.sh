@@ -84,7 +84,8 @@ echo "tc2-emu $EMU_DIR 9p trans=virtio,version=9p2000.L,ro,nofail 0 0" >> /etc/f
 
 # Run stubs from the share in place of services that need hardware: I2C goes to
 # the emulated devices in tc2-emu-hw, and tc2-emu-agent fakes the RP2040 side of
-# tc2-agent. tc2-hat-attiny runs a build with guest/patches applied.
+# tc2-agent (or tc2-agent-launcher runs the real one against an emulated RP2040).
+# tc2-hat-attiny runs a build with guest/patches applied.
 replace_service() {
     mkdir -p "/etc/systemd/system/$1.service.d"
     cat > "/etc/systemd/system/$1.service.d/tc2-emu.conf" <<EOF
@@ -97,7 +98,7 @@ ExecStart=$EMU_DIR/guest/$2
 EOF
 }
 replace_service tc2-hat-i2c tc2-emu-i2c
-replace_service tc2-agent tc2-emu-agent
+replace_service tc2-agent tc2-agent-launcher
 replace_service tc2-hat-attiny "tc2-hat-controller attiny"
 
 for svc in "${DISABLED_SERVICES[@]}"; do

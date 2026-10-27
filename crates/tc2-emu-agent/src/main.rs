@@ -33,6 +33,12 @@ struct Args {
     /// tc2-agent's default output directory; thermal-uploader uploads from here.
     #[arg(long, default_value = "/var/spool/cptv")]
     output_dir: PathBuf,
+    /// Location written into recordings, replacing the fixture's real one. The
+    /// default is the test location cacophony-web's e2e tests use.
+    #[arg(long, default_value_t = -42.0, allow_negative_numbers = true)]
+    latitude: f32,
+    #[arg(long, default_value_t = 172.0)]
+    longitude: f32,
 }
 
 /// tc2-agent's TestRecordingStatus.
@@ -91,6 +97,8 @@ impl Recorder {
                 device_name: &device.name,
                 device_id: device.id,
                 motion_config: cptv::TEST_RECORDING_MOTION_CONFIG,
+                latitude: self.args.latitude,
+                longitude: self.args.longitude,
             },
         )?;
 

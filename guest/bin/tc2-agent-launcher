@@ -1,0 +1,9 @@
+#!/bin/sh
+# Runs in place of tc2-agent. With tc2-emu.agent=real on the kernel command line
+# (TC2_AGENT=real), runs the real tc2-agent against the emulated RP2040, otherwise
+# the tc2-emu-agent stand-in.
+dir=$(dirname "$0")
+if grep -qw 'tc2-emu.agent=real' /proc/cmdline; then
+    exec "$dir/tc2-agent" --rp2040-link /dev/virtio-ports/org.cacophony.tc2-emu.rp2040 "$@"
+fi
+exec "$dir/tc2-emu-agent" "$@"

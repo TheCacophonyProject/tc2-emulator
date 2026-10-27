@@ -12,6 +12,7 @@ services:
       TC2_API: ${TC2_API:-host.docker.internal:1080}
       TC2_GROUP: ${TC2_GROUP:-}
       TC2_NAME: ${TC2_NAME:-}
+      TC2_AGENT: ${TC2_AGENT:-}
       TC2_PERSIST: ${TC2_PERSIST:-0}
     extra_hosts:
       - "host.docker.internal:host-gateway"

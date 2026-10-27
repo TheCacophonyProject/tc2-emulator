@@ -4,6 +4,8 @@
 #                  reachable in the guest as http://192.168.1.1:1080
 #   TC2_GROUP      group to register the device in (default "new")
 #   TC2_NAME       device name to register as (default: random)
+#   TC2_AGENT=real run the real tc2-agent against an emulated RP2040, rather than
+#                  the tc2-emu-agent stand-in
 #   TC2_PERSIST=1  keep guest disk changes between runs (default: fresh each run)
 #   TC2_SMP        guest CPU count (default 4, as on a Pi Zero 2 W)
 set -euo pipefail
@@ -26,6 +28,7 @@ fi
 APPEND="root=PARTUUID=93147b3c-02 rootfstype=ext4 rootwait fsck.repair=yes console=ttyAMA0 net.ifnames=0 spidev.bufsiz=65536"
 [[ -n ${TC2_GROUP:-} ]] && APPEND+=" tc2-emu.group=$TC2_GROUP"
 [[ -n ${TC2_NAME:-} ]] && APPEND+=" tc2-emu.name=$TC2_NAME"
+[[ ${TC2_AGENT:-} == real ]] && APPEND+=" tc2-emu.agent=real"
 
 # The image configures eth0 statically as 192.168.1.2/24 with no gateway, so the
 # user-mode network uses that subnet. QEMU presents forwarded connections with
@@ -43,6 +46,8 @@ socat TCP-LISTEN:1080,bind=127.0.0.1,fork,reuseaddr "TCP:${TC2_API:-host.docker.
 # virtio-serial port, and load from $EMU/guest, shared into the guest over 9p.
 [[ -x $EMU/host/tc2-emu-hw ]] || { echo "missing $EMU/host/tc2-emu-hw - run 'make stubs'" >&2; exit 1; }
 "$EMU/host/tc2-emu-hw" --socket "$STATE/hw.sock" --listen 0.0.0.0:9000 &
+# Stand-in RP2040 for the real tc2-agent.
+[[ ${TC2_AGENT:-} == real ]] && "$EMU/host/tc2-emu-rp2040" --socket "$STATE/rp2040.sock" &
 
 # 512M matches the Pi Zero 2 W, the lowest-spec hardware variant.
 exec qemu-system-aarch64 \
@@ -56,6 +61,8 @@ exec qemu-system-aarch64 \
     -device virtio-serial-pci \
     -chardev socket,id=hw,path="$STATE/hw.sock",server=on,wait=off \
     -device virtserialport,chardev=hw,name=org.cacophony.tc2-emu.hw \
+    -chardev socket,id=rp2040,path="$STATE/rp2040.sock",server=on,wait=off \
+    -device virtserialport,chardev=rp2040,name=org.cacophony.tc2-emu.rp2040 \
     -virtfs local,path="$EMU",mount_tag=tc2-emu,security_model=none,readonly=on \
     -display none -serial mon:stdio \
     -qmp unix:"$STATE/qmp.sock",server=on,wait=off

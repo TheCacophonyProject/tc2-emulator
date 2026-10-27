@@ -9,6 +9,7 @@
       <sourceFolder url="file://$MODULE_DIR$/crates/tc2-emu-hw/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/crates/tc2-emu-i2c/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/crates/tc2-emu-proto/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/tc2-emu-rp2040/src" isTestSource="false" />
       <excludeFolder url="file://$MODULE_DIR$/target" />
     </content>
     <orderEntry type="sourceFolder" forTests="false" />
