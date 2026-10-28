@@ -1,0 +1,10 @@
+#!/bin/sh
+# Runs in place of tc2-hat-i2c: tc2-emu-i2c serves its org.cacophony.i2c D-Bus
+# interface from the emulated HAT. Then, as tc2-hat-i2c does when it starts,
+# tc2-hat-controller's EEPROM check copies the HAT EEPROM to
+# /etc/cacophony/eeprom-data.json, where tc2-hat-attiny reads the PCB versions.
+dir=$(dirname "$0")
+"$dir/tc2-emu-i2c" "$@" &
+i2c=$!
+"$dir/tc2-hat-controller" i2c eeprom || echo "EEPROM check failed" >&2
+wait "$i2c"

@@ -1,0 +1,13 @@
+# prod.tc2 from salt-version-info, updated 2026-10-28T02:04:15.681Z.
+# Regenerate with scripts/update-versions.sh.
+cacophony-config 1.34.2
+classifier-pipeline 0.0.67
+device-register 1.7.1
+event-reporter 3.12.2
+management-interface 1.50.4
+modemd 1.16.0
+rpi-net-manager 0.6.2
+salt-updater 0.10.1
+tc2-agent 0.11.0
+tc2-hat-controller 0.34.3
+thermal-uploader 2.11.1
