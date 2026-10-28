@@ -46,6 +46,38 @@ comm -13 /tmp/packages-before /tmp/packages-after | xargs apt-get purge -y
 rm -rf /tmp/gpio-mockup-build /tmp/packages-before /tmp/packages-after
 apt-get clean
 
+# Update the Cacophony software to the versions salt deploys, pinned in
+# guest/versions/packages.txt, as saltops' cacophony.pkg_installed_from_github and
+# pkg_installed_from_pypi states do: release debs installed with dpkg, and
+# classifier-pipeline from PyPI into its venv.
+while read -r pkg version; do
+    case $pkg in
+    '' | '#'*) continue ;;
+    classifier-pipeline)
+        /home/pi/.venv/classifier/bin/python3 -m pip install --no-cache-dir "$pkg==$version"
+        continue
+        ;;
+    esac
+    installed=$(dpkg-query -W -f '${Version}' "$pkg" 2>/dev/null | tr '~' '-' || true)
+    [[ $installed == "$version" ]] && continue
+    # Each package is released from the repo of the same name, but for go-config.
+    repo=$pkg
+    [[ $pkg == cacophony-config ]] && repo=go-config
+    echo "Updating $pkg from ${installed:-none} to $version"
+    curl -sfL -o "/tmp/$pkg.deb" \
+        "https://github.com/TheCacophonyProject/$repo/releases/download/v$version/${pkg}_${version}_arm64.deb"
+    # salt-updater's postinst runs salt-helper, which needs a salt minion id, so
+    # give it one until device-register writes the real one on first boot.
+    placeholder_minion_id=
+    if [[ $pkg == salt-updater && ! -e /etc/salt/minion_id ]]; then
+        echo pi-0 > /etc/salt/minion_id
+        placeholder_minion_id=1
+    fi
+    dpkg -i "/tmp/$pkg.deb"
+    [[ -n $placeholder_minion_id ]] && rm /etc/salt/minion_id
+    rm "/tmp/$pkg.deb"
+done < /tmp/tc2-emu-guest/versions/packages.txt
+
 cat > /etc/modprobe.d/tc2-emu.conf <<'EOF'
 # One chip at base 0 so sysfs GPIO numbers match the Pi's BCM numbers.
 options gpio-mockup gpio_mockup_ranges=0,28
@@ -85,7 +117,7 @@ echo "tc2-emu $EMU_DIR 9p trans=virtio,version=9p2000.L,ro,nofail 0 0" >> /etc/f
 # Run stubs from the share in place of services that need hardware: I2C goes to
 # the emulated devices in tc2-emu-hw, and tc2-emu-agent fakes the RP2040 side of
 # tc2-agent (or tc2-agent-launcher runs the real one against an emulated RP2040).
-# tc2-hat-attiny runs a build with guest/patches applied.
+# tc2-hat-attiny and cacophony-config-sync run builds with guest/patches applied.
 replace_service() {
     mkdir -p "/etc/systemd/system/$1.service.d"
     cat > "/etc/systemd/system/$1.service.d/tc2-emu.conf" <<EOF
@@ -97,9 +129,10 @@ ExecStart=
 ExecStart=$EMU_DIR/guest/$2
 EOF
 }
-replace_service tc2-hat-i2c tc2-emu-i2c
+replace_service tc2-hat-i2c tc2-hat-i2c-launcher
 replace_service tc2-agent tc2-agent-launcher
 replace_service tc2-hat-attiny "tc2-hat-controller attiny"
+replace_service cacophony-config-sync "cacophony-config-utils sync"
 
 for svc in "${DISABLED_SERVICES[@]}"; do
     mkdir -p "/etc/systemd/system/$svc.service.d"

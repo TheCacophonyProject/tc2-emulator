@@ -4,18 +4,26 @@
 # golang container with the repo at /src (see the Makefile).
 set -euo pipefail
 
-VERSION=0.25.0
-# From `tc2-hat-attiny --attiny-firmware-info` on the image.
-ATTINY_MAJOR=1
-ATTINY_MINOR=0
-ATTINY_PATCH=9
-ATTINY_HASH=0ab3e8cbd00a3e47a039dced0909927cbebe5b36e82e299d8e34e875785dbabd
+# The release the image is updated to (see scripts/update-versions.sh).
+VERSION=$(awk '$1 == "tc2-hat-controller" { print $2 }' /src/guest/versions/packages.txt)
 
 OUT=${1:?usage: build-tc2-hat-controller.sh <output>}
 SRC=$(mktemp -d)
 trap 'rm -rf "$SRC"' EXIT
 
 git clone -q --depth 1 --branch "v$VERSION" https://github.com/TheCacophonyProject/tc2-hat-controller "$SRC"
+
+# The ATtiny firmware the release expects, as its release workflow sets it. The
+# emulated ATtiny (tc2-emu-hw) must report the same version.
+attiny_env() {
+    sed -n "s/^ *$1: *\([0-9]*\)\$/\1/p" "$SRC/.github/workflows/goreleaser.yml"
+}
+ATTINY_MAJOR=$(attiny_env ATTINY_MAJOR)
+ATTINY_MINOR=$(attiny_env ATTINY_MINOR)
+ATTINY_PATCH=$(attiny_env ATTINY_PATCH)
+ATTINY_HASH=$(curl -sfL "https://github.com/TheCacophonyProject/attiny1616/releases/download/v$ATTINY_MAJOR.$ATTINY_MINOR.$ATTINY_PATCH/firmware.hex.sha256" | cut -d ' ' -f 1)
+: "${ATTINY_MAJOR:?}${ATTINY_MINOR:?}${ATTINY_PATCH:?}${ATTINY_HASH:?}"
+echo "tc2-hat-controller $VERSION expects ATtiny firmware $ATTINY_MAJOR.$ATTINY_MINOR.$ATTINY_PATCH ($ATTINY_HASH)"
 git -C "$SRC" apply /src/guest/patches/tc2-hat-controller/*.patch
 cd "$SRC"
 CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o "$OUT" -ldflags "-s -w \

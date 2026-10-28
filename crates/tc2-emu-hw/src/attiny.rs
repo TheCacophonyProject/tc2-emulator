@@ -10,9 +10,9 @@ use serde::{Deserialize, Serialize};
 
 pub const ADDRESS: u8 = 0x25;
 
-/// Firmware version tc2-hat-controller 0.25.0 expects; any other version makes
+/// Firmware version tc2-hat-controller 0.34.3 expects; any other version makes
 /// tc2-hat-attiny try to reflash the ATtiny over UPDI.
-pub const FIRMWARE_VERSION: (u8, u8, u8) = (1, 0, 9);
+pub const FIRMWARE_VERSION: (u8, u8, u8) = (1, 0, 10);
 
 const TYPE_VALUE: u8 = 0xCA;
 
@@ -32,9 +32,13 @@ pub mod reg {
     pub const LV_BATTERY_1: u8 = 0x13;
     pub const HV_BATTERY_1: u8 = 0x15;
     pub const RTC_BATTERY_1: u8 = 0x17;
+    /// The ATtiny1616's RSTCTRL.RSTFR, why it last reset.
+    pub const RESET_FLAGS: u8 = 0x30;
 }
 
-const REGISTER_COUNT: usize = 0x30;
+const REGISTER_COUNT: usize = 0x31;
+/// Power-on reset, the only reset the emulated ATtiny has had.
+const POWER_ON_RESET: u8 = 0x01;
 const READ_ONLY: [u8; 4] = [reg::TYPE, reg::MAJOR_VERSION, reg::MINOR_VERSION, reg::PATCH_VERSION];
 /// Writing this bit to the first register of a battery pair starts an analog
 /// reading; the ATtiny clears it when the reading is ready.
@@ -123,6 +127,7 @@ impl Attiny {
         let [hi, lo] = BOOT_DURATION_SECONDS.to_be_bytes();
         regs[reg::BOOT_DURATION_1 as usize] = hi;
         regs[reg::BOOT_DURATION_2 as usize] = lo;
+        regs[reg::RESET_FLAGS as usize] = POWER_ON_RESET;
         let mut attiny = Attiny { regs, inputs: Inputs::default() };
         attiny.apply_inputs();
         attiny
@@ -244,7 +249,8 @@ mod tests {
         assert_eq!(read_register(&mut attiny, reg::TYPE), TYPE_VALUE);
         assert_eq!(read_register(&mut attiny, reg::MAJOR_VERSION), 1);
         assert_eq!(read_register(&mut attiny, reg::MINOR_VERSION), 0);
-        assert_eq!(read_register(&mut attiny, reg::PATCH_VERSION), 9);
+        assert_eq!(read_register(&mut attiny, reg::PATCH_VERSION), 10);
+        assert_eq!(read_register(&mut attiny, reg::RESET_FLAGS), POWER_ON_RESET);
     }
 
     #[test]

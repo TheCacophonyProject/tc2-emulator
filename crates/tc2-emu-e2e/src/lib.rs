@@ -151,6 +151,26 @@ impl User {
         Ok(devices.devices)
     }
 
+    /// The device's settings on the API, as the web portal shows them.
+    pub fn device_settings(&self, device_id: u64) -> anyhow::Result<Value> {
+        let mut response: Value =
+            send_json(self.get(&format!("/api/v1/devices/{device_id}/settings")))?;
+        Ok(response["settings"].take())
+    }
+
+    /// Updates device settings as the web portal does. Each section needs its own
+    /// `updated` time, which the device sync uses to pick the newest.
+    pub fn update_device_settings(&self, device_id: u64, settings: Value) -> anyhow::Result<()> {
+        let _: Value = send_json(
+            self.client
+                .post(format!("{}/api/v1/devices/{device_id}/settings", api_url()))
+                .header("Authorization", &self.token)
+                .json(&json!({ "settings": settings })),
+        )
+        .context("updating device settings")?;
+        Ok(())
+    }
+
     /// Thermal recordings of any length from `device_id` in a group, newest first.
     pub fn thermal_recordings(&self, group_id: u64, device_id: u64) -> anyhow::Result<Vec<Value>> {
         let response: Value =
@@ -230,6 +250,49 @@ impl Managementd {
         Ok(())
     }
 
+    /// The device's config sections, as `/api/config` returns them: keyed by
+    /// camelCase section name, with Go field names inside.
+    pub fn config(&self) -> anyhow::Result<Value> {
+        let mut config: Value = send_json(self.request(reqwest::Method::GET, "/config"))?;
+        Ok(config["values"].take())
+    }
+
+    /// Writes keys of one config section (e.g. `thermal-recorder`, with mapstructure
+    /// keys like `use-low-power-mode`), as Sidekick does. The device stamps `updated`.
+    pub fn set_config(&self, section: &str, config: Value) -> anyhow::Result<()> {
+        self.send(
+            self.request(reqwest::Method::POST, "/config")
+                .form(&[("section", section), ("config", &config.to_string())]),
+        )?;
+        Ok(())
+    }
+
+    /// The audio recording form of the web UI.
+    pub fn set_audio_recording(&self, mode: &str) -> anyhow::Result<()> {
+        self.send(
+            self.request(reqwest::Method::POST, "/audiorecording")
+                .form(&[("audio-mode", mode), ("audio-seed", "0")]),
+        )?;
+        Ok(())
+    }
+
+    /// Rewrites the device's location as it is, so the config file changes and
+    /// cacophony-config-sync runs (after 10s), as it would after Sidekick edits.
+    /// Nothing else prompts a sync of portal changes: it otherwise runs at start,
+    /// when the modem connects, and daily.
+    pub fn trigger_config_sync(&self) -> anyhow::Result<()> {
+        let location = self.config()?["location"].clone();
+        let coordinate = |key: &str| location[key].as_f64().unwrap_or_default().to_string();
+        self.send(self.request(reqwest::Method::POST, "/location").form(&[
+            ("latitude", coordinate("Latitude")),
+            ("longitude", coordinate("Longitude")),
+            ("altitude", "0".into()),
+            ("accuracy", "0".into()),
+            ("timestamp", "0".into()),
+        ]))?;
+        Ok(())
+    }
+
     pub fn take_short_test_recording(&self) -> anyhow::Result<String> {
         send_json(self.request(reqwest::Method::PUT, "/thermal/short-test-recording"))
     }
@@ -237,4 +300,40 @@ impl Managementd {
     pub fn thermal_status(&self) -> anyhow::Result<ThermalStatus> {
         send_json(self.request(reqwest::Method::GET, "/thermal/thermal-status"))
     }
+}
+
+/// A registered device moved into a new user's group, as after `new_device_setup`.
+pub struct TestDevice {
+    pub managementd: Managementd,
+    pub user: User,
+    pub group: String,
+    pub group_id: u64,
+    pub device_id: u64,
+}
+
+impl TestDevice {
+    /// Waits for the emulated device to register, then has a new user move it into
+    /// a new group. Reregistering gives the device a new id each time.
+    pub fn set_up() -> anyhow::Result<Self> {
+        let managementd = Managementd::new();
+        let user = User::create()?;
+        user.ensure_group("new")?;
+        wait_for("device to register", Duration::from_secs(300), || {
+            Ok(managementd.device_info().ok().filter(|info| info.device_id != 0))
+        })?;
+        let group = test_name("group");
+        let group_id = user.create_group(&group)?;
+        managementd.reregister_authorized(&user, &group, &test_name("device"))?;
+        let device_id = managementd.device_info()?.device_id;
+        Ok(TestDevice { managementd, user, group, group_id, device_id })
+    }
+
+    pub fn settings(&self) -> anyhow::Result<Value> {
+        self.user.device_settings(self.device_id)
+    }
+}
+
+/// An `updated` time for a settings section as the web portal makes it.
+pub fn now_iso() -> String {
+    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }

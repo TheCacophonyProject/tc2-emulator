@@ -4,16 +4,21 @@
 # /src (see the Makefile).
 set -euo pipefail
 
-COMMIT=812f7b1  # main, expecting RP2040 firmware version 40
-RP2040_FIRMWARE_RELEASE=0.7.0  # tc2-firmware release with firmware version 40
+# The release the image is updated to (see scripts/update-versions.sh).
+VERSION=$(awk '$1 == "tc2-agent" { print $2 }' /src/guest/versions/packages.txt)
 
 OUT=${1:?usage: build-tc2-agent.sh <output>}
 SRC=$(mktemp -d)
 trap 'rm -rf "$SRC"' EXIT
 
-git clone -q https://github.com/TheCacophonyProject/tc2-agent "$SRC"
-git -C "$SRC" checkout -q "$COMMIT"
+git clone -q --depth 1 --branch "v$VERSION" https://github.com/TheCacophonyProject/tc2-agent "$SRC"
 git -C "$SRC" apply /src/guest/patches/tc2-agent/*.patch
+
+# The tc2-firmware release whose firmware this release expects, as its release
+# workflow sets it. The emulated RP2040 must report the same firmware version.
+RP2040_FIRMWARE_RELEASE=$(sed -n 's/^ *RP2040_FIRMWARE_VERSION: *\([0-9.]*\)$/\1/p' "$SRC/.github/workflows/release.yaml")
+: "${RP2040_FIRMWARE_RELEASE:?}"
+echo "tc2-agent $VERSION expects tc2-firmware $RP2040_FIRMWARE_RELEASE"
 mkdir -p "$SRC/_releases"
 curl -sfL -o "$SRC/_releases/tc2-firmware.sha256" \
     "https://github.com/TheCacophonyProject/tc2-firmware/releases/download/v$RP2040_FIRMWARE_RELEASE/tc2-firmware.sha256"

@@ -84,8 +84,9 @@ flowchart LR
     image --> images[("images/")]
 
     crates["crates/ Rust workspace"] --> stubs["make stubs<br/>stubs-builder container"]
-    agentsrc["tc2-agent 812f7b1<br/>+ guest/patches"] --> stubs
-    hatsrc["tc2-hat-controller v0.25.0<br/>+ guest/patches"] --> stubs
+    versions["guest/versions/packages.txt<br/>salt's released versions"] --> image
+    versions --> stubs
+    hatsrc["tc2-agent, tc2-hat-controller, go-config<br/>+ guest/patches"] --> stubs
     fixtures["fixtures/*.cptv<br/>fetched, not committed"] --> stubs
     stubs --> build[("build/guest: aarch64, shared over 9p<br/>build/host: Docker host's arch")]
 ```
@@ -129,6 +130,12 @@ on a Mac:
 
 See `scripts/guest-setup.sh`. In short:
 
+- The Cacophony software is updated to the versions salt deploys, pinned in
+  `guest/versions/packages.txt`: release debs from GitHub, and `classifier-pipeline`
+  from PyPI into its venv, as saltops installs them. The SD card image is older
+  than what salt keeps devices on. `scripts/update-versions.sh [channel]` re-pins
+  them from [salt-version-info](https://github.com/TheCacophonyProject/salt-version-info)
+  (default `prod`, the image's `tc2-prod` salt environment); then `make image`.
 - `device-register` registers with the test API instead of production (see below).
 - `salt-minion`, `salt-updater`, swap, `rpi-eeprom-update` and `sshswitch` are
   disabled; add `tc2-emu.enable=<service>` to the kernel command line to enable one.
@@ -173,12 +180,14 @@ and registers a new device; use `TC2_PERSIST=1` to keep the registration.
 The Rust workspace in `crates/` stands in for the TC2 HAT:
 
 - `tc2-emu-hw` runs in the container and models the devices on the HAT's I2C bus:
-  the ATtiny power controller (0x25, firmware v1.0.9), PCF8563 RTC (0x51), AHT20
+  the ATtiny power controller (0x25, firmware v1.0.10), PCF8563 RTC (0x51), AHT20
   temperature/humidity sensor (0x38) and the hardware EEPROM (0x50, power PCB v0.7.0).
 - `tc2-emu-i2c` replaces `tc2-hat-i2c` in the guest. All TC2 software reaches the
   I2C bus through its `org.cacophony.i2c.Tx` D-Bus method, which it forwards to
   `tc2-emu-hw` over a virtio-serial port. The real `tc2-hat-attiny`, `tc2-hat-rtc`
-  and `tc2-hat-temp` run unchanged on top.
+  and `tc2-hat-temp` run unchanged on top. Its launcher then runs tc2-hat-i2c's
+  startup EEPROM check (`tc2-hat-controller i2c eeprom`), which writes the
+  `/etc/cacophony/eeprom-data.json` that `tc2-hat-attiny` reads battery settings from.
 - `tc2-emu-agent` replaces `tc2-agent` until it can talk to an emulated RP2040. It
   serves the `org.cacophony.TC2Agent` methods managementd uses, with tc2-agent's
   replies and status codes. A test recording goes through tc2-agent's status
@@ -186,8 +195,8 @@ The Rust workspace in `crates/` stands in for the TC2 HAT:
   thermal-uploader, with its header rewritten to the current time, this device's
   name and id, and the `test: true` motion config tc2-firmware writes for a
   user-requested recording. Audio recordings and preview frames aren't emulated yet.
-- With `TC2_AGENT=real`, the guest runs the real `tc2-agent` instead (built from
-  `main` with `guest/patches/tc2-agent`), talking to an emulated RP2040 over a
+- With `TC2_AGENT=real`, the guest runs the real `tc2-agent` instead (built with
+  `guest/patches/tc2-agent`), talking to an emulated RP2040 over a
   second virtio-serial port (`--rp2040-link`). For now that's `tc2-emu-rp2040`, a
   scripted stand-in in the container: it makes the startup handshake (firmware 40),
   then streams flat frames. It can't make recordings yet; tc2-firmware's simulation
@@ -219,15 +228,23 @@ the sysfs `gpiochip0`). For example, the ATtiny signals the Pi by pulling GPIO16
 
 Fixes the emulator needs before they're upstream live in `guest/patches/`.
 `make stubs` builds the upstream version with them applied, and the guest runs
-that build for the affected service only:
+that build for the affected service only. Released software is patched at the
+version in `guest/versions/packages.txt`, so it matches the rest of the image:
 
-- `tc2-agent` `main` (`scripts/build-tc2-agent.sh`): `--rp2040-link <path>` talks to
+- `tc2-agent` (`scripts/build-tc2-agent.sh`): `--rp2040-link <path>` talks to
   an emulated RP2040 over a socket instead of SPI and GPIO, and never programs it.
-  The socket protocol is described in the patch's `src/rp2040_link.rs`.
-- `tc2-hat-controller` v0.25.0, for `tc2-hat-attiny`: if GPIO16 can't be set up
-  with a pull-up, set it up without one rather than reading an unopened pin, which
-  always reads low and looks like a constant signal from the ATtiny. Off a real Pi,
-  periph's sysfs GPIO driver can't set pulls. Its version reports as `0.25.0+tc2-emu`.
+  The socket protocol is described in the patch's `src/rp2040_link.rs`. It's built
+  with the tc2-firmware release its release workflow sets, whose firmware version
+  `tc2-emu-rp2040` must report (`FIRMWARE_VERSION`).
+- `tc2-hat-controller`, for `tc2-hat-attiny`: if GPIO16 can't be set up with a
+  pull-up, set it up without one rather than reading an unopened pin, which always
+  reads low and looks like a constant signal from the ATtiny. Off a real Pi,
+  periph's sysfs GPIO driver can't set pulls. Its version reports as `<version>+tc2-emu`.
+  It's built with the ATtiny firmware version its release workflow sets, which
+  `tc2-emu-hw` must report (`FIRMWARE_VERSION` in `attiny.rs`).
+- `go-config`, for `cacophony-config-sync`: when the device in the config file
+  changes, as reregistering through Sidekick does, authenticate as the new device.
+  Otherwise it carries on syncing settings with the old one until it restarts.
 
 ## End-to-end tests
 
@@ -236,6 +253,11 @@ Cacophony API: it creates a user and group per test (as cacophony-web's e2e-test
 do), then uses managementd's HTTP API as Sidekick or the web UI would.
 `new_device_setup` checks a new device registers into `new`, can be moved and
 renamed into the user's group, and that a test recording reaches the API.
+`config_sync` checks cacophony-config-sync carries the power mode, recording window
+and audio recording mode from the web portal to the device and back. It needs the
+`go-config` patch above: without it, the sync still uses the old device's
+credentials after reregistering. The tests share the one device, so `make e2e`
+runs them in turn, `new_device_setup` first (`E2E_TESTS` in the Makefile).
 
 The tests are `#[ignore]`d so `cargo test` stays offline; `make e2e` starts a fresh
 emulator and runs them. Set `TC2_E2E_API` / `TC2_E2E_MANAGEMENTD` to point elsewhere.

@@ -1,0 +1,140 @@
+diff --git a/internal/cacophony-config-sync/main.go b/internal/cacophony-config-sync/main.go
+index 7a18802..c9b3a36 100644
+--- a/internal/cacophony-config-sync/main.go
++++ b/internal/cacophony-config-sync/main.go
+@@ -187,6 +187,7 @@ var ConfigSections = Sections{
+ }
+ 
+ type CacophonyAPIInterface interface {
++	DeviceID() int
+ 	GetDeviceSettings() (map[string]any, error)
+ 	UpdateDeviceSettings(settings map[string]any) (map[string]any, error)
+ }
+@@ -221,9 +222,9 @@ func isNetworkError(err error) bool {
+ // connectToAPI will keep trying to make an API client while it is failing
+ // because of the internet connection, so that a temporary internet issue
+ // doesn't stop the service from starting.
+-func connectToAPI() (*api.CacophonyAPI, error) {
++func connectToAPI() (CacophonyAPIInterface, error) {
+ 	for {
+-		apiClient, err := api.New()
++		apiClient, err := newAPIClient()
+ 		if err == nil {
+ 			return apiClient, nil
+ 		}
+@@ -235,6 +236,32 @@ func connectToAPI() (*api.CacophonyAPI, error) {
+ 	}
+ }
+ 
++// newAPIClient authenticates with the API as the device in the config file.
++var newAPIClient = func() (CacophonyAPIInterface, error) {
++	return api.New()
++}
++
++// checkDeviceID makes a new API client if the device in the config file is not
++// the one the current client is for. Reregistering the device, as Sidekick does
++// when moving it to another group, gives it a new id and password, and the old
++// client would carry on syncing settings with the old device.
++func (s *SyncService) checkDeviceID() error {
++	var device config.Device
++	if err := s.config.Unmarshal(config.DeviceKey, &device); err != nil {
++		return err
++	}
++	if device.ID == s.apiClient.DeviceID() {
++		return nil
++	}
++	log.Infof("Device id changed from %d to %d, authenticating as the new device", s.apiClient.DeviceID(), device.ID)
++	apiClient, err := newAPIClient()
++	if err != nil {
++		return fmt.Errorf("failed to create API client: %w", err)
++	}
++	s.apiClient = apiClient
++	return nil
++}
++
+ func NewSyncService() (*SyncService, error) {
+ 	// Wait for an internet connection.
+ 	cr := connrequester.NewConnectionRequester()
+@@ -320,6 +347,10 @@ func (s *SyncService) syncSettings() error {
+ 	if err != nil {
+ 		return fmt.Errorf("failed to read current settings: %v", err)
+ 	}
++	// readCurrentSettings has reloaded the config file.
++	if err := s.checkDeviceID(); err != nil {
++		return err
++	}
+ 	log.Printf("Device Settings: %+v", deviceSettings)
+ 
+ 	// Send config to server and get the updated settings
+diff --git a/internal/cacophony-config-sync/main_test.go b/internal/cacophony-config-sync/main_test.go
+index 0af8b0f..29f82b6 100644
+--- a/internal/cacophony-config-sync/main_test.go
++++ b/internal/cacophony-config-sync/main_test.go
+@@ -1,10 +1,16 @@
+ package cacophonyconfigsync
+ 
+ import (
++	"fmt"
++	"path"
+ 	"testing"
+ 	"time"
+ 
++	config "github.com/TheCacophonyProject/go-config"
++	"github.com/TheCacophonyProject/go-config/configtest"
++	"github.com/spf13/afero"
+ 	"github.com/stretchr/testify/assert"
++	"github.com/stretchr/testify/require"
+ )
+ 
+ func TestMapServerSettingsToConfig(t *testing.T) {
+@@ -232,3 +238,50 @@ func TestFilterUnchangedSettings(t *testing.T) {
+ 		})
+ 	}
+ }
++
++type fakeAPIClient struct {
++	deviceID int
++}
++
++func (f *fakeAPIClient) DeviceID() int { return f.deviceID }
++
++func (f *fakeAPIClient) GetDeviceSettings() (map[string]any, error) { return nil, nil }
++
++func (f *fakeAPIClient) UpdateDeviceSettings(map[string]any) (map[string]any, error) {
++	return nil, nil
++}
++
++// newDeviceConfig makes a config for a device with the given id, in an in-memory fs.
++func newDeviceConfig(t *testing.T, deviceID int) *config.Config {
++	fs := afero.NewMemMapFs()
++	config.SetFs(fs)
++	configFile := path.Join(configDir, config.ConfigFileName)
++	lockFile, cleanup := configtest.WriteConfigFromBytes(t, []byte(fmt.Sprintf("[device]\nid = %d\n", deviceID)), configFile, fs)
++	t.Cleanup(cleanup)
++	config.SetLockFilePath(lockFile)
++	conf, err := config.New(configDir)
++	require.NoError(t, err)
++	return conf
++}
++
++func TestCheckDeviceID(t *testing.T) {
++	clientsMade := 0
++	defaultNewAPIClient := newAPIClient
++	newAPIClient = func() (CacophonyAPIInterface, error) {
++		clientsMade++
++		return &fakeAPIClient{deviceID: 2}, nil
++	}
++	t.Cleanup(func() { newAPIClient = defaultNewAPIClient })
++
++	// Same device: keeps the client.
++	syncService := &SyncService{apiClient: &fakeAPIClient{deviceID: 1}, config: newDeviceConfig(t, 1)}
++	require.NoError(t, syncService.checkDeviceID())
++	assert.Equal(t, 0, clientsMade)
++	assert.Equal(t, 1, syncService.apiClient.DeviceID())
++
++	// Reregistered as device 2: authenticates as it.
++	syncService.config = newDeviceConfig(t, 2)
++	require.NoError(t, syncService.checkDeviceID())
++	assert.Equal(t, 1, clientsMade)
++	assert.Equal(t, 2, syncService.apiClient.DeviceID())
++}

@@ -52,10 +52,10 @@ fixtures/cat-trigger.cptv:
 	curl -sfL --create-dirs -o $@ \
 		https://raw.githubusercontent.com/TheCacophonyProject/tc2-firmware/$(FIXTURES_COMMIT)/test-fixtures/cat-trigger.cptv
 
-# tc2-agent main with guest/patches applied, until they're upstream. Uses the
+# Released tc2-agent with guest/patches applied, until they're upstream. Uses the
 # Docker cargo home for crates, but its own target dir inside the clone.
 stubs: build/guest/tc2-agent
-build/guest/tc2-agent: scripts/build-tc2-agent.sh $(wildcard guest/patches/tc2-agent/*) | stubs-builder
+build/guest/tc2-agent: scripts/build-tc2-agent.sh guest/versions/packages.txt $(wildcard guest/patches/tc2-agent/*) | stubs-builder
 	docker run --rm -u $(shell id -u):$(shell id -g) -v $(CURDIR):/src -e HOME=/tmp \
 		-e CARGO_HOME=/src/target/docker/cargo-home \
 		tc2-emu-stubs-builder /src/scripts/build-tc2-agent.sh /src/target/docker/tc2-agent-bin
@@ -63,11 +63,20 @@ build/guest/tc2-agent: scripts/build-tc2-agent.sh $(wildcard guest/patches/tc2-a
 
 # Released tc2-hat-controller with guest/patches applied, until they're upstream.
 stubs: build/guest/tc2-hat-controller
-build/guest/tc2-hat-controller: scripts/build-tc2-hat-controller.sh $(wildcard guest/patches/tc2-hat-controller/*) | stubs-builder
+build/guest/tc2-hat-controller: scripts/build-tc2-hat-controller.sh guest/versions/packages.txt $(wildcard guest/patches/tc2-hat-controller/*) | stubs-builder
 	docker run --rm -u $(shell id -u):$(shell id -g) -v $(CURDIR):/src -e HOME=/tmp \
 		-e GOCACHE=/src/target/docker/go-cache -e GOMODCACHE=/src/target/docker/go-mod \
 		golang:1.25-bookworm /src/scripts/build-tc2-hat-controller.sh /src/target/docker/tc2-hat-controller
 	$(INSTALL) -D -t build/guest target/docker/tc2-hat-controller
+
+# Released go-config with guest/patches applied, for cacophony-config-sync, until
+# they're upstream.
+stubs: build/guest/cacophony-config-utils
+build/guest/cacophony-config-utils: scripts/build-go-config.sh guest/versions/packages.txt $(wildcard guest/patches/go-config/*) | stubs-builder
+	docker run --rm -u $(shell id -u):$(shell id -g) -v $(CURDIR):/src -e HOME=/tmp \
+		-e GOCACHE=/src/target/docker/go-cache -e GOMODCACHE=/src/target/docker/go-mod \
+		golang:1.25-bookworm /src/scripts/build-go-config.sh /src/target/docker/cacophony-config-utils
+	$(INSTALL) -D -t build/guest target/docker/cacophony-config-utils
 
 build:
 	docker compose build
@@ -87,12 +96,17 @@ down:
 # The tests reach both through the Docker host's published ports, since Docker
 # Desktop only has host networking as an opt-in.
 E2E_HOST := http://host.docker.internal
+# The tests share the one emulated device, so they run one at a time, in this
+# order: new_device_setup needs the device as it first registers, and the others
+# move it to a group of their own.
+E2E_TESTS := new_device_setup config_sync
 e2e: build stubs
 	docker compose up -d --force-recreate
 	$(DOCKER_RUN) --add-host host.docker.internal:host-gateway \
 		-e TC2_E2E_API=$(E2E_HOST):1080 -e TC2_E2E_MANAGEMENTD=$(E2E_HOST):8080 \
 		-e CARGO_HOME=/src/target/docker/cargo-home -e CARGO_TARGET_DIR=/src/target/docker \
-		tc2-emu-stubs-builder cargo test -p tc2-emu-e2e -- --ignored --nocapture
+		tc2-emu-stubs-builder sh -ec 'for test in $(E2E_TESTS); do \
+			cargo test -p tc2-emu-e2e --test $$test -- --ignored --nocapture --test-threads=1; done'
 
 ssh:
 	$(SSH)

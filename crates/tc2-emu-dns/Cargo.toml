@@ -1,0 +1,12 @@
+[package]
+name = "tc2-emu-dns"
+description = "Fake DNS for the guest, resolving every name to the host side of QEMU's network"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+env_logger.workspace = true
+log.workspace = true
+clap = { version = "4", features = ["derive"] }
