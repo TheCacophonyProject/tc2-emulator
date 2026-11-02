@@ -10,7 +10,7 @@
 
 use serde_json::{Value, json};
 use std::time::Duration;
-use tc2_emu_e2e::{TestDevice, now_iso, wait_for};
+use tc2_emu_e2e::{LoggedInEntity, TestDevice, now_iso, wait_for};
 
 /// The sync waits 10s after the config file changes, and the emulated device is slow.
 const SYNC_TIMEOUT: Duration = Duration::from_secs(180);
@@ -53,7 +53,7 @@ fn expected(case: &Case) -> (bool, String, String, String) {
 #[ignore = "needs a running emulator and API; run with `make e2e`"]
 fn portal_settings_sync_to_device() -> anyhow::Result<()> {
     let device = TestDevice::set_up()?;
-    println!("Device {} in group {}", device.device_id, device.group);
+    println!("Device {} in group {}", device.device_id, device.project);
 
     for case in &CASES {
         // The web portal sends every section it edited, each stamped as updated now.
@@ -86,7 +86,7 @@ fn portal_settings_sync_to_device() -> anyhow::Result<()> {
 #[ignore = "needs a running emulator and API; run with `make e2e`"]
 fn device_settings_sync_to_portal() -> anyhow::Result<()> {
     let device = TestDevice::set_up()?;
-    println!("Device {} in group {}", device.device_id, device.group);
+    println!("Device {} in group {}", device.device_id, device.project);
 
     for case in &CASES {
         // Set the way Sidekick (config sections) and the web UI (audio form) do.

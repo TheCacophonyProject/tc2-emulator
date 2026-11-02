@@ -1,5 +1,5 @@
 //! Initial setup of a new device by its user: the device registers itself into
-//! the `new` group, the user moves and renames it into their own group through
+//! the `new` project, the user moves and renames it into their own project through
 //! Sidekick, then takes a test recording and finds it on the server.
 //!
 //! Needs a freshly started emulator and the Cacophony API; run with `make e2e`.
@@ -14,38 +14,38 @@ fn new_device_setup() -> anyhow::Result<()> {
     let device = Managementd::new();
     let user = User::create()?;
 
-    // A fresh API database may not have the `new` group yet. device-register
+    // A fresh API database may not have the `new` project yet. device-register
     // keeps retrying until it can register, so create it now if absent.
-    if user.ensure_group("new")? {
-        println!("Created the new group");
+    if user.ensure_project("new")? {
+        println!("Created the new project");
     }
 
     // The emulated device registers itself into `new` on first boot, then reboots.
     let registered = wait_for("device to register", Duration::from_secs(300), || {
         Ok(device.device_info().ok().filter(|info| info.device_id != 0))
     })?;
-    assert_eq!(registered.groupname, "new");
+    assert_eq!(registered.projectname, "new");
     println!("Device registered as {registered:?}");
 
-    let group = test_name("group");
-    let group_id = user.create_group(&group)?;
-    println!("Created user {} and group {group} ({group_id})", user.name);
+    let project = test_name("project");
+    let project_id = user.create_project(&project)?.project_id;
+    println!("Created user {} and project {project} ({project_id})", user.name);
 
-    // Sidekick moves the device into the user's group and renames it.
+    // Sidekick moves the device into the user's project and renames it.
     let name = test_name("device");
-    device.reregister_authorized(&user, &group, &name)?;
+    device.reregister_authorized(&user, &project, &name)?;
     let moved = device.device_info()?;
     assert_eq!(
-        (moved.groupname.as_str(), moved.devicename.as_str()),
-        (group.as_str(), name.as_str())
+        (moved.projectname.as_str(), moved.devicename.as_str()),
+        (project.as_str(), name.as_str())
     );
     assert_ne!(moved.device_id, registered.device_id, "reregistering makes a new device");
-    let api_devices = user.group_devices(&group)?;
+    let api_devices = user.project_devices(&project)?;
     assert!(
         api_devices.iter().any(|d| d.id == moved.device_id && d.device_name == name),
-        "device {name} not in {group}: {api_devices:?}"
+        "device {name} not in {project}: {api_devices:?}"
     );
-    println!("Moved device to {group} as {name} ({})", moved.device_id);
+    println!("Moved device to {project} as {name} ({})", moved.device_id);
 
     // The user takes a test recording from the web UI or Sidekick.
     // tc2-agent may still be starting after the device's post-registration reboot.
@@ -60,7 +60,7 @@ fn new_device_setup() -> anyhow::Result<()> {
     })?;
 
     let recording = wait_for("recording to reach the API", Duration::from_secs(120), || {
-        Ok(user.thermal_recordings(group_id, moved.device_id)?.into_iter().next())
+        Ok(user.thermal_recordings(project_id, moved.device_id)?.into_iter().next())
     })?;
     println!("Recording on the API: {recording:#}");
     let recorded_at: DateTime<Utc> =

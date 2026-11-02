@@ -1,6 +1,9 @@
 //! Helpers for end-to-end tests: a client for the Cacophony API acting as a user
 //! (mirroring cacophony-web's e2e-tests helpers), and one for the emulated
 //! device's managementd, acting as Sidekick or the web UI.
+//!
+//! Projects are called groups by the API and managementd; that name is kept only
+//! in their paths and JSON fields.
 
 use anyhow::{Context, bail};
 use reqwest::blocking::{Client, RequestBuilder, Response};
@@ -60,13 +63,67 @@ fn send_json<T: DeserializeOwned>(request: RequestBuilder) -> anyhow::Result<T> 
     serde_json::from_str(&body).with_context(|| format!("parsing response {body}"))
 }
 
+/// A logged-in session on the Cacophony API, as a user or a device.
+pub struct Session {
+    /// JWT as returned by the API, sent as-is in the Authorization header.
+    pub token: String,
+    client: Client,
+}
+
+impl Session {
+    pub fn request(&self, method: reqwest::Method, path: &str) -> RequestBuilder {
+        self.client
+            .request(method, format!("{}{path}", api_url()))
+            .header("Authorization", &self.token)
+    }
+
+    pub fn get(&self, path: &str) -> RequestBuilder {
+        self.request(reqwest::Method::GET, path)
+    }
+
+    pub fn post(&self, path: &str) -> RequestBuilder {
+        self.request(reqwest::Method::POST, path)
+    }
+}
+
+/// Anything that makes API requests with its own token. Requests only some kinds
+/// of entity may make are inherent methods on that type; ones open to any entity
+/// belong here as provided methods.
+pub trait LoggedInEntity {
+    fn session(&self) -> &Session;
+
+    /// The device's settings on the API, as the web portal shows them. Users must
+    /// be in the device's project; a device can only get its own.
+    fn device_settings(&self, device_id: u64) -> anyhow::Result<Value> {
+        let mut response: Value =
+            send_json(self.session().get(&format!("/api/v1/devices/{device_id}/settings")))?;
+        Ok(response["settings"].take())
+    }
+
+    /// Updates device settings as the web portal does. Each section needs its own
+    /// `updated` time, which the device sync uses to pick the newest.
+    fn update_device_settings(&self, device_id: u64, settings: Value) -> anyhow::Result<()> {
+        let _: Value = send_json(
+            self.session()
+                .post(&format!("/api/v1/devices/{device_id}/settings"))
+                .json(&json!({ "settings": settings })),
+        )
+        .context("updating device settings")?;
+        Ok(())
+    }
+}
+
 /// A user on the Cacophony API.
 pub struct User {
     pub name: String,
     pub id: u64,
-    /// JWT as returned by the API, sent as-is in the Authorization header.
-    pub token: String,
-    client: Client,
+    pub session: Session,
+}
+
+impl LoggedInEntity for User {
+    fn session(&self) -> &Session {
+        &self.session
+    }
 }
 
 #[derive(Deserialize)]
@@ -86,7 +143,8 @@ struct UserData {
 pub struct ApiDevice {
     pub id: u64,
     pub device_name: String,
-    pub group_name: String,
+    #[serde(rename = "groupName")]
+    pub project_name: String,
 }
 
 impl User {
@@ -102,34 +160,34 @@ impl User {
                 "endUserAgreement": 3,
             })))
             .context("registering user")?;
-        Ok(User { name, id: user.user_data.id, token: user.token, client })
+        Ok(User { name, id: user.user_data.id, session: Session { token: user.token, client } })
     }
 
-    fn get(&self, path: &str) -> RequestBuilder {
-        self.client.get(format!("{}{path}", api_url())).header("Authorization", &self.token)
+    /// Creates a project, of which this user becomes admin.
+    pub fn create_project(&self, name: &str) -> anyhow::Result<ProjectAdmin<'_>> {
+        let response: Value =
+            send_json(self.session.post("/api/v1/groups").json(&json!({ "groupName": name })))
+                .context("creating project")?;
+        let project_id = response["groupId"].as_u64().context("no groupId in response")?;
+        Ok(ProjectAdmin::assume(self, project_id))
     }
 
-    /// Creates a group (a "project" in browse-next) and returns its id.
-    pub fn create_group(&self, name: &str) -> anyhow::Result<u64> {
-        let response: Value = send_json(
-            self.client
-                .post(format!("{}/api/v1/groups", api_url()))
-                .header("Authorization", &self.token)
-                .json(&json!({ "groupName": name })),
-        )
-        .context("creating group")?;
-        response["groupId"].as_u64().context("no groupId in response")
+    /// Checks that this user is an admin of `project_id`, so that a setup mistake
+    /// fails here rather than as a 403 later.
+    pub fn as_admin_of(&self, project_id: u64) -> anyhow::Result<ProjectAdmin<'_>> {
+        let response: Value = send_json(self.session.get(&format!("/api/v1/groups/{project_id}")))
+            .with_context(|| format!("getting project {project_id}"))?;
+        if response["group"]["admin"] != true {
+            bail!("{} is not an admin of project {project_id}", self.name);
+        }
+        Ok(ProjectAdmin::assume(self, project_id))
     }
 
-    /// Creates group `name` if no one has, returning whether it did. Groups can
-    /// only be looked up by their members, so this tries to create it.
-    pub fn ensure_group(&self, name: &str) -> anyhow::Result<bool> {
-        let response = self
-            .client
-            .post(format!("{}/api/v1/groups", api_url()))
-            .header("Authorization", &self.token)
-            .json(&json!({ "groupName": name }))
-            .send()?;
+    /// Creates project `name` if it doesn't exist, returning creation success.
+    /// Projects can only be looked up by their members.
+    pub fn ensure_project(&self, name: &str) -> anyhow::Result<bool> {
+        let response =
+            self.session.post("/api/v1/groups").json(&json!({ "groupName": name })).send()?;
         let status = response.status();
         let body = response.text()?;
         let in_use = serde_json::from_str::<Value>(&body).unwrap_or_default()["messages"]
@@ -138,51 +196,69 @@ impl User {
         match status.as_u16() {
             200..=299 => Ok(true),
             422 if in_use => Ok(false),
-            _ => bail!("creating group {name}: {status}: {body}"),
+            _ => bail!("creating project {name}: {status}: {body}"),
         }
     }
 
-    pub fn group_devices(&self, group: &str) -> anyhow::Result<Vec<ApiDevice>> {
+    pub fn project_devices(&self, project: &str) -> anyhow::Result<Vec<ApiDevice>> {
         #[derive(Deserialize)]
         struct Devices {
             devices: Vec<ApiDevice>,
         }
-        let devices: Devices = send_json(self.get(&format!("/api/v1/groups/{group}/devices")))?;
+        let devices: Devices =
+            send_json(self.session.get(&format!("/api/v1/groups/{project}/devices")))?;
         Ok(devices.devices)
     }
 
-    /// The device's settings on the API, as the web portal shows them.
-    pub fn device_settings(&self, device_id: u64) -> anyhow::Result<Value> {
-        let mut response: Value =
-            send_json(self.get(&format!("/api/v1/devices/{device_id}/settings")))?;
-        Ok(response["settings"].take())
-    }
-
-    /// Updates device settings as the web portal does. Each section needs its own
-    /// `updated` time, which the device sync uses to pick the newest.
-    pub fn update_device_settings(&self, device_id: u64, settings: Value) -> anyhow::Result<()> {
-        let _: Value = send_json(
-            self.client
-                .post(format!("{}/api/v1/devices/{device_id}/settings", api_url()))
-                .header("Authorization", &self.token)
-                .json(&json!({ "settings": settings })),
-        )
-        .context("updating device settings")?;
-        Ok(())
-    }
-
-    /// Thermal recordings of any length from `device_id` in a group, newest first.
-    pub fn thermal_recordings(&self, group_id: u64, device_id: u64) -> anyhow::Result<Vec<Value>> {
-        let response: Value =
-            send_json(self.get(&format!("/api/v1/recordings/for-project/{group_id}")).query(&[
+    /// Thermal recordings of any length from `device_id` in a project, newest first.
+    pub fn thermal_recordings(
+        &self,
+        project_id: u64,
+        device_id: u64,
+    ) -> anyhow::Result<Vec<Value>> {
+        let response: Value = send_json(
+            self.session.get(&format!("/api/v1/recordings/for-project/{project_id}")).query(&[
                 ("types", "thermal"),
                 ("devices", &device_id.to_string()),
                 ("include-false-positives", "true"),
                 // Without this the API applies a minimum duration. Not
                 // `status-recordings`, which means only those under 2.5s.
                 ("duration", "0"),
-            ]))?;
+            ]),
+        )?;
         Ok(response["recordings"].as_array().cloned().unwrap_or_default())
+    }
+}
+
+/// A user acting as an admin of one project. Admin rights are per project, so
+/// requests that need them are methods here, implicitly on `project_id`.
+pub struct ProjectAdmin<'a> {
+    pub user: &'a User,
+    pub project_id: u64,
+}
+
+impl<'a> ProjectAdmin<'a> {
+    /// Without checking `user` is an admin: prefer `User::create_project` or
+    /// `User::as_admin_of`. For tests that a non-admin is refused.
+    pub fn assume(user: &'a User, project_id: u64) -> Self {
+        ProjectAdmin { user, project_id }
+    }
+
+    /// Adds `user` to the project, or changes their admin status if already in it.
+    pub fn add_user(&self, user: &User, admin: bool) -> anyhow::Result<()> {
+        let _: Value = send_json(self.session().post("/api/v1/groups/users").json(&json!({
+            "groupId": self.project_id,
+            "userId": user.id,
+            "admin": admin,
+        })))
+        .with_context(|| format!("adding {} to project {}", user.name, self.project_id))?;
+        Ok(())
+    }
+}
+
+impl LoggedInEntity for ProjectAdmin<'_> {
+    fn session(&self) -> &Session {
+        self.user.session()
     }
 }
 
@@ -195,7 +271,8 @@ pub struct Managementd {
 #[derive(Deserialize, Debug, Clone, PartialEq)]
 pub struct DeviceInfo {
     pub devicename: String,
-    pub groupname: String,
+    #[serde(rename = "groupname")]
+    pub projectname: String,
     #[serde(rename = "deviceID")]
     pub device_id: u64,
 }
@@ -236,16 +313,18 @@ impl Managementd {
     }
 
     /// Moves and/or renames the device, authorized by `user`, as Sidekick does.
+    /// Moving only needs `user` to be in `project`; just renaming would need them
+    /// to be admin of the device's project.
     pub fn reregister_authorized(
         &self,
         user: &User,
-        group: &str,
+        project: &str,
         name: &str,
     ) -> anyhow::Result<()> {
         self.send(self.request(reqwest::Method::POST, "/reregister-authorized").json(&json!({
-            "newGroup": group,
+            "newGroup": project,
             "newName": name,
-            "authorizedUser": user.token,
+            "authorizedUser": user.session.token,
         })))?;
         Ok(())
     }
@@ -302,30 +381,35 @@ impl Managementd {
     }
 }
 
-/// A registered device moved into a new user's group, as after `new_device_setup`.
+/// A registered device moved into a new user's project, as after `new_device_setup`.
 pub struct TestDevice {
     pub managementd: Managementd,
     pub user: User,
-    pub group: String,
-    pub group_id: u64,
+    pub project: String,
+    pub project_id: u64,
     pub device_id: u64,
 }
 
 impl TestDevice {
     /// Waits for the emulated device to register, then has a new user move it into
-    /// a new group. Reregistering gives the device a new id each time.
+    /// a new project. Reregistering gives the device a new id each time.
     pub fn set_up() -> anyhow::Result<Self> {
         let managementd = Managementd::new();
         let user = User::create()?;
-        user.ensure_group("new")?;
+        user.ensure_project("new")?;
         wait_for("device to register", Duration::from_secs(300), || {
             Ok(managementd.device_info().ok().filter(|info| info.device_id != 0))
         })?;
-        let group = test_name("group");
-        let group_id = user.create_group(&group)?;
-        managementd.reregister_authorized(&user, &group, &test_name("device"))?;
+        let project = test_name("project");
+        let project_id = user.create_project(&project)?.project_id;
+        managementd.reregister_authorized(&user, &project, &test_name("device"))?;
         let device_id = managementd.device_info()?.device_id;
-        Ok(TestDevice { managementd, user, group, group_id, device_id })
+        Ok(TestDevice { managementd, user, project, project_id, device_id })
+    }
+
+    /// `user`, as the admin of the project it created.
+    pub fn admin(&self) -> ProjectAdmin<'_> {
+        ProjectAdmin::assume(&self.user, self.project_id)
     }
 
     pub fn settings(&self) -> anyhow::Result<Value> {
