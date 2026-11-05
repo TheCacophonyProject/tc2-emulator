@@ -185,7 +185,7 @@ impl User {
 
     /// Creates project `name` if it doesn't exist, returning creation success.
     /// Projects can only be looked up by their members.
-    pub fn ensure_project(&self, name: &str) -> anyhow::Result<bool> {
+    pub fn ensure_project_exists(&self, name: &str) -> anyhow::Result<bool> {
         let response =
             self.session.post("/api/v1/groups").json(&json!({ "groupName": name })).send()?;
         let status = response.status();
@@ -313,8 +313,9 @@ impl Managementd {
     }
 
     /// Moves and/or renames the device, authorized by `user`, as Sidekick does.
-    /// Moving only needs `user` to be in `project`; just renaming would need them
-    /// to be admin of the device's project.
+    /// `user` only needs to be in `project`: managementd always sends a project,
+    /// filling in the current one, so the API's admin check for a rename alone
+    /// never applies.
     pub fn reregister_authorized(
         &self,
         user: &User,
@@ -392,11 +393,12 @@ pub struct TestDevice {
 
 impl TestDevice {
     /// Waits for the emulated device to register, then has a new user move it into
-    /// a new project. Reregistering gives the device a new id each time.
+    /// a new project. With no device of the same name there to take over, that
+    /// makes a new device, so it gets a new id each time.
     pub fn set_up() -> anyhow::Result<Self> {
         let managementd = Managementd::new();
         let user = User::create()?;
-        user.ensure_project("new")?;
+        user.ensure_project_exists("new")?;
         wait_for("device to register", Duration::from_secs(300), || {
             Ok(managementd.device_info().ok().filter(|info| info.device_id != 0))
         })?;

@@ -16,7 +16,7 @@ fn new_device_setup() -> anyhow::Result<()> {
 
     // A fresh API database may not have the `new` project yet. device-register
     // keeps retrying until it can register, so create it now if absent.
-    if user.ensure_project("new")? {
+    if user.ensure_project_exists("new")? {
         println!("Created the new project");
     }
 
@@ -39,6 +39,7 @@ fn new_device_setup() -> anyhow::Result<()> {
         (moved.projectname.as_str(), moved.devicename.as_str()),
         (project.as_str(), name.as_str())
     );
+    // A new name in a new project, so there's no existing device to take over.
     assert_ne!(moved.device_id, registered.device_id, "reregistering makes a new device");
     let api_devices = user.project_devices(&project)?;
     assert!(
