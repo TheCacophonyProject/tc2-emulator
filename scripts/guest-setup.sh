@@ -20,6 +20,12 @@ DISABLED_SERVICES=(
     sshswitch
     salt-minion
     salt-updater
+    # No USB modem. It only starts once registering makes /etc/salt/minion_id,
+    # then exits at once and restarts every 5s, loading the guest.
+    modemd
+    # No wlan0. It tries to start the hotspot anyway, taking NetworkManager down
+    # (and with it the host's connections to managementd), then exits and restarts.
+    rpi-net-manager
 )
 
 # Generic arm64 kernel for QEMU -M virt. The initramfs is built in the chroot, so
@@ -77,6 +83,13 @@ while read -r pkg version; do
     [[ -n $placeholder_minion_id ]] && rm /etc/salt/minion_id
     rm "/tmp/$pkg.deb"
 done < /tmp/tc2-emu-guest/versions/packages.txt
+
+# No salt master. The image's minion config retries it forever (master_tries:
+# -1), so salt-call without --local never exits: managementd runs `salt-call
+# grains.setvals` (go-utils saltutil.SetGrains) on each reregister, and these
+# piled up until the guest ran out of memory. Run salt-call masterless instead.
+mkdir -p /etc/salt/minion.d
+echo 'file_client: local' > /etc/salt/minion.d/tc2-emu.conf
 
 cat > /etc/modprobe.d/tc2-emu.conf <<'EOF'
 # One chip at base 0 so sysfs GPIO numbers match the Pi's BCM numbers.

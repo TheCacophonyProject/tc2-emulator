@@ -348,11 +348,27 @@ impl Managementd {
     }
 
     /// The audio recording form of the web UI.
-    pub fn set_audio_recording(&self, mode: &str) -> anyhow::Result<()> {
+    pub fn set_audio_recording(&self, mode: &str, seed: u32) -> anyhow::Result<()> {
         self.send(
             self.request(reqwest::Method::POST, "/audiorecording")
-                .form(&[("audio-mode", mode), ("audio-seed", "0")]),
+                .form(&[("audio-mode", mode), ("audio-seed", &seed.to_string())]),
         )?;
+        Ok(())
+    }
+
+    /// Sets the battery chemistry and/or cell count, as the battery page does. An
+    /// empty chemistry or zero cell count is left for the device to detect.
+    pub fn set_battery_config(&self, chemistry: &str, cell_count: u32) -> anyhow::Result<()> {
+        self.send(
+            self.request(reqwest::Method::POST, "/battery/config")
+                .json(&json!({ "chemistry": chemistry, "cellCount": cell_count })),
+        )?;
+        Ok(())
+    }
+
+    /// Goes back to detecting the battery, as the battery page does.
+    pub fn clear_battery_config(&self) -> anyhow::Result<()> {
+        self.send(self.request(reqwest::Method::DELETE, "/battery/config"))?;
         Ok(())
     }
 

@@ -19,9 +19,10 @@ $(IMAGES)/base.qcow2: $(SRC_IMG) $(IMAGES)/id_ed25519 scripts/prepare-image.sh s
 # tc2-emu-* binaries: build/guest is shared into the guest over 9p, build/host
 # runs in the container, so it's built for the Docker host's architecture
 # (x86_64, or aarch64 on Apple silicon). Built in Docker with a separate target
-# dir and cargo home, so they don't mix with host builds. `install` replaces the
-# binaries rather than overwriting them, so this works while the emulator is
-# running them; it runs in Docker too, since macOS's lacks -D and -t.
+# dir and cargo home, so they don't mix with host builds. install-replace.sh
+# renames new binaries into place rather than overwriting them, so this works
+# while the emulator is running them; it runs in Docker too, since macOS's
+# install lacks -D and -t.
 GUEST_BINS := tc2-emu-i2c tc2-emu-agent tc2-emu-dns
 HOST_BINS  := tc2-emu-hw tc2-emu-rp2040
 GUEST_TARGET := aarch64-unknown-linux-musl
@@ -30,7 +31,7 @@ DOCKER_RUN := docker run --rm -u $(shell id -u):$(shell id -g) -v $(CURDIR):/src
 CARGO_DOCKER := $(DOCKER_RUN) \
 	-e CARGO_HOME=/src/target/docker/cargo-home -e CARGO_TARGET_DIR=/src/target/docker \
 	tc2-emu-stubs-builder
-INSTALL := $(DOCKER_RUN) tc2-emu-stubs-builder install
+INSTALL := $(DOCKER_RUN) tc2-emu-stubs-builder scripts/install-replace.sh
 
 stubs-builder:
 	docker build -q -t tc2-emu-stubs-builder -f docker/stubs.Dockerfile docker

@@ -3,5 +3,10 @@
   <component name="VcsDirectoryMappings">
     <mapping directory="" vcs="Git" />
     <mapping directory="$PROJECT_DIR$" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/upstream/cacophony-web" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/upstream/go-api" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/upstream/go-config" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/upstream/management-interface" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/upstream/tc2-hat-controller" vcs="Git" />
   </component>
 </project>

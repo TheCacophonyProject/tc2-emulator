@@ -1,0 +1,568 @@
+diff --git a/internal/cacophony-config-sync/main.go b/internal/cacophony-config-sync/main.go
+index c9b3a36..71c38ea 100644
+--- a/internal/cacophony-config-sync/main.go
++++ b/internal/cacophony-config-sync/main.go
+@@ -20,6 +20,7 @@ package cacophonyconfigsync
+ import (
+ 	"errors"
+ 	"fmt"
++	"math"
+ 	"net"
+ 	"os"
+ 	"path/filepath"
+@@ -64,15 +65,72 @@ type Mapping struct {
+ 	ConfigKey string
+ 	MapKey    string
+ 	Converter ConverterFunc
++	// Validate checks a value from the API before it is written to the config,
++	// for checks that the config's own validation doesn't make.
++	Validate func(any) error
+ }
+ 
+ // Section holds the section name and its mappings
+ type Section struct {
+-	Name     string
+-	Key      string
++	Name string
++	Key  string
++	// Config is a pointer to the section's struct, giving its type.
+ 	Config   any
+ 	Updated  time.Time
+ 	Mappings []Mapping
++	// FromAPI, if set, adjusts the section's settings from the API, keyed by
++	// MapKey, before they are written to the config.
++	FromAPI func(settings map[string]any)
++	// ToAPI, if set, adjusts the section's settings for the API, keyed by
++	// APIKey, given the section's config struct.
++	ToAPI func(config any, settings map[string]any)
++}
++
++// wholeNumberIn validates that a value is a whole number from min to max, since
++// the config would otherwise truncate or wrap it to fit an integer field.
++func wholeNumberIn(min, max float64) func(any) error {
++	return func(value any) error {
++		var f float64
++		v := reflect.ValueOf(value)
++		switch {
++		case v.CanInt():
++			f = float64(v.Int())
++		case v.CanUint():
++			f = float64(v.Uint())
++		case v.CanFloat():
++			f = v.Float()
++		default:
++			return fmt.Errorf("expected a number, got %T", value)
++		}
++		if f != math.Trunc(f) || f < min || f > max {
++			return fmt.Errorf("expected a whole number from %v to %v, got %v", min, max, value)
++		}
++		return nil
++	}
++}
++
++// batteryFromAPI completes battery settings from the API. The web portal leaves
++// out the chemistry or cell count to have the device detect it, so that they
++// are cleared rather than left as they were, and sets the battery as manually
++// configured when either is given, as managementd does.
++func batteryFromAPI(settings map[string]any) {
++	if _, ok := settings["chemistry"]; !ok {
++		settings["chemistry"] = ""
++	}
++	if _, ok := settings["manual-cell-count"]; !ok {
++		settings["manual-cell-count"] = 0
++	}
++	settings["manually-configured"] = !isEmptyValue(settings["chemistry"]) ||
++		!isEmptyValue(settings["manual-cell-count"])
++}
++
++// batteryToAPI only reports the chemistry and cell count when the battery is
++// manually configured, since otherwise the device detects them.
++func batteryToAPI(conf any, settings map[string]any) {
++	if !conf.(*config.Battery).IsManuallyConfigured() {
++		settings["chemistry"] = ""
++		settings["manualCellCount"] = 0
++	}
+ }
+ 
+ // Sections is a slice of Section
+@@ -112,6 +170,7 @@ var ConfigSections = Sections{
+ 				APIKey:    "audioSeed",
+ 				ConfigKey: "AudioSeed",
+ 				MapKey:    "random-seed",
++				Validate:  wholeNumberIn(0, math.MaxUint32),
+ 			},
+ 			{
+ 				APIKey:    "updated",
+@@ -175,6 +234,7 @@ var ConfigSections = Sections{
+ 				APIKey:    "manualCellCount",
+ 				ConfigKey: "ManualCellCount",
+ 				MapKey:    "manual-cell-count",
++				Validate:  wholeNumberIn(0, math.MaxInt32),
+ 			},
+ 			{
+ 				APIKey:    "updated",
+@@ -183,6 +243,8 @@ var ConfigSections = Sections{
+ 				Converter: stringToTimeConverter,
+ 			},
+ 		},
++		FromAPI: batteryFromAPI,
++		ToAPI:   batteryToAPI,
+ 	},
+ }
+ 
+@@ -342,7 +404,12 @@ func (s *SyncService) syncSettings() error {
+ 	}
+ 	log.Println("Internet connection made")
+ 	defer cr.Stop()
++	return s.sync()
++}
+ 
++// sync sends the device's settings to the API, then updates the config with
++// any that are newer on the API.
++func (s *SyncService) sync() error {
+ 	deviceSettings, err := s.readCurrentSettings()
+ 	if err != nil {
+ 		return fmt.Errorf("failed to read current settings: %v", err)
+@@ -442,12 +509,15 @@ func (s *SyncService) readCurrentSettings() (map[string]any, error) {
+ 	settings := make(map[string]any)
+ 
+ 	for _, section := range ConfigSections {
+-		err := s.config.Unmarshal(section.Key, section.Config)
++		// A new struct each time, as unmarshalling leaves fields that aren't in
++		// the config as they were.
++		sectionConfig := reflect.New(reflect.TypeOf(section.Config).Elem()).Interface()
++		err := s.config.Unmarshal(section.Key, sectionConfig)
+ 		if err != nil {
+ 			return nil, err
+ 		}
+ 
+-		sectionData := reflect.ValueOf(section.Config).Elem()
++		sectionData := reflect.ValueOf(sectionConfig).Elem()
+ 
+ 		sectionSettings := make(map[string]any)
+ 		for _, mapping := range section.Mappings {
+@@ -458,6 +528,9 @@ func (s *SyncService) readCurrentSettings() (map[string]any, error) {
+ 				log.Warnf("Field %s not found in section %s\n", mapping.ConfigKey, section.Key)
+ 			}
+ 		}
++		if section.ToAPI != nil {
++			section.ToAPI(sectionConfig, sectionSettings)
++		}
+ 
+ 		settings[section.Name] = sectionSettings
+ 	}
+@@ -501,6 +574,13 @@ func (s *SyncService) mapServerSettingsToConfig(serverSettings map[string]any) m
+ 						} else {
+ 							sectionSettings[mapping.MapKey] = value
+ 						}
++						if mapping.Validate != nil {
++							if err := mapping.Validate(value); err != nil {
++								log.Errorf("Ignoring section %s from the API, invalid %s: %v", section.Name, mapping.APIKey, err)
++								sectionSettings = nil
++								break
++							}
++						}
+ 					}
+ 				}
+ 			}
+@@ -508,6 +588,9 @@ func (s *SyncService) mapServerSettingsToConfig(serverSettings map[string]any) m
+ 
+ 		// Only add non-empty sections
+ 		if len(sectionSettings) > 0 {
++			if section.FromAPI != nil {
++				section.FromAPI(sectionSettings)
++			}
+ 			mappedSettings[section.Key] = sectionSettings
+ 		}
+ 	}
+@@ -518,13 +601,19 @@ func (s *SyncService) mapServerSettingsToConfig(serverSettings map[string]any) m
+ 
+ func (s *SyncService) updateConfig(settings map[string]any) error {
+ 	fmt.Printf("Settings: %v\n", settings)
++	// Write the config once, at the end, as services restart or reload on each
++	// change to it.
++	s.config.AutoWrite = false
++	defer func() { s.config.AutoWrite = true }()
+ 	for _, section := range ConfigSections {
+ 		if sectionSettings, ok := settings[section.Key]; ok {
+ 			newConfig := sectionSettings.(map[string]any)
+ 			fmt.Printf("New config: %v\n", newConfig)
+-			err := s.config.SetFromMap(section.Key, newConfig, true)
++			// Invalid settings from the API are left out, keeping the device's,
++			// so that they don't stop the other sections or later syncs.
++			err := s.config.SetFromMap(section.Key, newConfig, false)
+ 			if err != nil {
+-				return fmt.Errorf("failed to set section %s: %v", section.Name, err)
++				log.Errorf("Ignoring section %s from the API, failed to set it: %v", section.Name, err)
+ 			}
+ 		}
+ 	}
+@@ -564,23 +653,14 @@ func (s *SyncService) uploadSettingsToAPI(settings map[string]any) (map[string]a
+ 	return updatedSettings, nil
+ }
+ 
+-// isEmptyValue checks if a value is considered empty
++// isEmptyValue checks if a value is considered empty: nil, a zero time, number
++// or string, or an empty slice or map. Booleans are never empty, so false is sent.
+ func isEmptyValue(v any) bool {
+ 	switch value := v.(type) {
+ 	case nil:
+ 		return true
+-	case string:
+-		return value == ""
+-	case int, int8, int16, int32, int64:
+-		return value == 0
+-	case uint, uint8, uint16, uint32, uint64:
+-		return value == 0
+-	case float32, float64:
+-		return value == float32(0)
+ 	case bool:
+ 		return false
+-	case time.Time:
+-		return value.IsZero()
+ 	case []any:
+ 		return len(value) == 0
+ 	case map[string]any:
+diff --git a/internal/cacophony-config-sync/main_test.go b/internal/cacophony-config-sync/main_test.go
+index 29f82b6..71a9fc8 100644
+--- a/internal/cacophony-config-sync/main_test.go
++++ b/internal/cacophony-config-sync/main_test.go
+@@ -1,7 +1,10 @@
+ package cacophonyconfigsync
+ 
+ import (
++	"encoding/json"
+ 	"fmt"
++	"math"
++	"os"
+ 	"path"
+ 	"testing"
+ 	"time"
+@@ -215,7 +218,7 @@ func TestFilterUnchangedSettings(t *testing.T) {
+ 				},
+ 			},
+ 			deviceSettings: map[string]interface{}{
+-				"audio-recording": map[string]interface{}{
++				"audioRecording": map[string]interface{}{
+ 					"audioMode": "AudioOnly",
+ 					"audioSeed": 42,
+ 					"updated":   now,
+@@ -285,3 +288,318 @@ func TestCheckDeviceID(t *testing.T) {
+ 	assert.Equal(t, 1, clientsMade)
+ 	assert.Equal(t, 2, syncService.apiClient.DeviceID())
+ }
++
++func TestIsEmptyValue(t *testing.T) {
++	for _, v := range []any{nil, "", 0, int64(0), uint32(0), float32(0), float64(0), time.Time{}, []any{}, map[string]any{}} {
++		assert.True(t, isEmptyValue(v), "%T(%v)", v, v)
++	}
++	for _, v := range []any{false, true, "a", 1, int64(1), uint32(1), float64(0.5), time.Now(), []any{1}, map[string]any{"a": 1}} {
++		assert.False(t, isEmptyValue(v), "%T(%v)", v, v)
++	}
++}
++
++func TestWholeNumberIn(t *testing.T) {
++	validate := wholeNumberIn(0, math.MaxUint32)
++	for _, v := range []any{0, uint32(7), float64(42), float64(math.MaxUint32)} {
++		assert.NoError(t, validate(v), "%T(%v)", v, v)
++	}
++	for _, v := range []any{-1, float64(-1), float64(1.5), float64(math.MaxUint32 + 1), "42", nil} {
++		assert.Error(t, validate(v), "%T(%v)", v, v)
++	}
++}
++
++// fakeSettingsAPI keeps device settings as the API does: sections replace the
++// API's when their `updated` is newer, or either has none, and come back as JSON.
++type fakeSettingsAPI struct {
++	settings map[string]any
++	uploaded map[string]any
++}
++
++func (f *fakeSettingsAPI) DeviceID() int { return 1 }
++
++func (f *fakeSettingsAPI) GetDeviceSettings() (map[string]any, error) { return asJSON(f.settings), nil }
++
++func (f *fakeSettingsAPI) UpdateDeviceSettings(settings map[string]any) (map[string]any, error) {
++	f.uploaded = asJSON(settings)
++	if f.settings == nil {
++		f.settings = map[string]any{}
++	}
++	for key, incoming := range f.uploaded {
++		current, ok := f.settings[key].(map[string]any)
++		incomingUpdated, incomingOk := incoming.(map[string]any)["updated"].(string)
++		currentUpdated, currentOk := current["updated"].(string)
++		if !ok || !incomingOk || !currentOk || parseTime(incomingUpdated).After(parseTime(currentUpdated)) {
++			f.settings[key] = incoming
++		}
++	}
++	return asJSON(f.settings), nil
++}
++
++func parseTime(s string) time.Time {
++	t, _ := time.Parse(time.RFC3339Nano, s)
++	return t
++}
++
++func asJSON(m map[string]any) map[string]any {
++	b, err := json.Marshal(m)
++	if err != nil {
++		panic(err)
++	}
++	var out map[string]any
++	if err := json.Unmarshal(b, &out); err != nil {
++		panic(err)
++	}
++	return out
++}
++
++// syncFs is the in-memory fs of the last newSyncService.
++var syncFs afero.Fs
++
++// newSyncService syncs a config file with the given content, as device 1, with
++// fake API settings.
++func newSyncService(t *testing.T, content string, apiSettings map[string]any) (*SyncService, *fakeSettingsAPI) {
++	fs := afero.NewMemMapFs()
++	syncFs = fs
++	config.SetFs(fs)
++	configFile := path.Join(configDir, config.ConfigFileName)
++	lockFile, cleanup := configtest.WriteConfigFromBytes(t, []byte("[device]\nid = 1\n"+content), configFile, fs)
++	t.Cleanup(cleanup)
++	config.SetLockFilePath(lockFile)
++	conf, err := config.New(configDir)
++	require.NoError(t, err)
++	api := &fakeSettingsAPI{settings: asJSON(apiSettings)}
++	return &SyncService{apiClient: api, config: conf}, api
++}
++
++func unmarshalSection[T any](t *testing.T, s *SyncService, key string) T {
++	var section T
++	require.NoError(t, s.config.Reload())
++	require.NoError(t, s.config.Unmarshal(key, &section))
++	return section
++}
++
++const (
++	older = "2025-01-01T00:00:00Z"
++	newer = "2025-06-01T00:00:00.123Z"
++)
++
++func TestSyncAppliesNewerAPISettings(t *testing.T) {
++	s, api := newSyncService(t, `
++[thermal-recorder]
++max-secs = 300
++use-low-power-mode = false
++updated = `+older+`
++[windows]
++start-recording = "-30m"
++stop-recording = "+30m"
++updated = `+older+`
++`, map[string]any{
++		"thermalRecording": map[string]any{"useLowPowerMode": true, "updated": newer},
++		"windows":          map[string]any{"startRecording": "22:00", "stopRecording": "06:00", "updated": newer},
++		"audioRecording":   map[string]any{"audioMode": "AudioOnly", "audioSeed": 42, "updated": newer},
++	})
++	require.NoError(t, s.sync())
++
++	thermal := unmarshalSection[config.ThermalRecorder](t, s, config.ThermalRecorderKey)
++	assert.True(t, thermal.UseLowPowerMode)
++	assert.Equal(t, 300, thermal.MaxSecs, "fields that aren't synced are kept")
++	windows := unmarshalSection[config.Windows](t, s, config.WindowsKey)
++	assert.Equal(t, "22:00", windows.StartRecording)
++	assert.Equal(t, "06:00", windows.StopRecording)
++	assert.True(t, windows.Updated.After(parseTime(newer)), "applying settings marks them as updated by the device")
++	audio := unmarshalSection[config.AudioRecording](t, s, config.AudioRecordingKey)
++	assert.Equal(t, "AudioOnly", audio.AudioMode)
++	assert.Equal(t, uint32(42), audio.AudioSeed)
++	// The device's older sections don't replace the API's.
++	assert.Equal(t, true, api.settings["thermalRecording"].(map[string]any)["useLowPowerMode"])
++}
++
++func TestSyncUploadsNewerDeviceSettings(t *testing.T) {
++	s, api := newSyncService(t, `
++[thermal-recorder]
++use-low-power-mode = false
++updated = `+newer+`
++[windows]
++start-recording = "09:00"
++stop-recording = "17:00"
++updated = `+newer+`
++[audio-recording]
++audio-mode = "AudioAndThermal"
++random-seed = 0
++updated = `+newer+`
++`, map[string]any{
++		"thermalRecording": map[string]any{"useLowPowerMode": true, "updated": older},
++		"windows":          map[string]any{"startRecording": "22:00", "stopRecording": "06:00", "updated": older},
++		"audioRecording":   map[string]any{"audioMode": "AudioOnly", "audioSeed": 42, "updated": older},
++	})
++	require.NoError(t, s.sync())
++
++	assert.Equal(t, map[string]any{
++		// false is sent, so that the API can be changed to it.
++		"thermalRecording": map[string]any{"useLowPowerMode": false, "updated": "2025-06-01T00:00:00.123Z"},
++		"windows":          map[string]any{"startRecording": "09:00", "stopRecording": "17:00", "updated": "2025-06-01T00:00:00.123Z"},
++		// A zero seed is left out, as it is when the portal hasn't set one.
++		"audioRecording": map[string]any{"audioMode": "AudioAndThermal", "updated": "2025-06-01T00:00:00.123Z"},
++	}, api.uploaded)
++	assert.Equal(t, api.uploaded, api.settings)
++	windows := unmarshalSection[config.Windows](t, s, config.WindowsKey)
++	assert.Equal(t, "09:00", windows.StartRecording)
++	assert.Equal(t, parseTime(newer), windows.Updated, "the device's settings are left as they were")
++}
++
++func TestSyncSkipsSectionsNeverUpdated(t *testing.T) {
++	// Sections without an `updated` time have only defaults, so aren't sent.
++	s, api := newSyncService(t, `
++[windows]
++start-recording = "09:00"
++stop-recording = "17:00"
++`, nil)
++	require.NoError(t, s.sync())
++	assert.Empty(t, api.uploaded)
++}
++
++func TestSyncBatteryFromPortal(t *testing.T) {
++	// The portal sets a chemistry and cell count.
++	s, api := newSyncService(t, "", map[string]any{
++		"battery": map[string]any{"chemistry": "lipo", "manualCellCount": 3, "updated": older},
++	})
++	require.NoError(t, s.sync())
++	battery := unmarshalSection[config.Battery](t, s, config.BatteryKey)
++	assert.Equal(t, "lipo", battery.Chemistry)
++	assert.Equal(t, 3, battery.ManualCellCount)
++	assert.True(t, battery.IsManuallyConfigured())
++
++	// Then "Auto-detect", which leaves both out.
++	api.settings["battery"] = map[string]any{"updated": time.Now().Add(time.Hour).Format(time.RFC3339Nano)}
++	require.NoError(t, s.sync())
++	battery = unmarshalSection[config.Battery](t, s, config.BatteryKey)
++	assert.Equal(t, "", battery.Chemistry)
++	assert.Equal(t, 0, battery.ManualCellCount)
++	assert.False(t, battery.IsManuallyConfigured())
++
++	// Just a chemistry, with the cell count detected.
++	api.settings["battery"] = map[string]any{"chemistry": "li-ion", "updated": time.Now().Add(2 * time.Hour).Format(time.RFC3339Nano)}
++	require.NoError(t, s.sync())
++	battery = unmarshalSection[config.Battery](t, s, config.BatteryKey)
++	assert.Equal(t, "li-ion", battery.Chemistry)
++	assert.Equal(t, 0, battery.ManualCellCount)
++	assert.True(t, battery.IsManuallyConfigured())
++}
++
++func TestSyncBatteryToPortal(t *testing.T) {
++	s, api := newSyncService(t, `
++[battery]
++chemistry = "lifepo4"
++manual-cell-count = 4
++manually-configured = true
++updated = `+newer+`
++`, nil)
++	require.NoError(t, s.sync())
++	assert.Equal(t, map[string]any{"chemistry": "lifepo4", "manualCellCount": float64(4), "updated": "2025-06-01T00:00:00.123Z"}, api.uploaded["battery"])
++
++	// When not manually configured, the device detects the battery, whatever
++	// chemistry and cell count are left in the config.
++	s, api = newSyncService(t, `
++[battery]
++chemistry = "lifepo4"
++manual-cell-count = 4
++manually-configured = false
++updated = `+newer+`
++`, nil)
++	require.NoError(t, s.sync())
++	assert.Equal(t, map[string]any{"updated": "2025-06-01T00:00:00.123Z"}, api.uploaded["battery"])
++}
++
++func TestSyncIgnoresInvalidAPISettings(t *testing.T) {
++	deviceConfig := `
++[windows]
++start-recording = "09:00"
++stop-recording = "17:00"
++updated = ` + older + `
++[audio-recording]
++audio-mode = "AudioOnly"
++random-seed = 7
++updated = ` + older + `
++[battery]
++chemistry = "lipo"
++manual-cell-count = 3
++manually-configured = true
++updated = ` + older + `
++`
++	for name, invalid := range map[string]map[string]any{
++		"window":     {"windows": map[string]any{"startRecording": "soon", "stopRecording": "17:00", "updated": newer}},
++		"seed":       {"audioRecording": map[string]any{"audioMode": "Disabled", "audioSeed": -1, "updated": newer}},
++		"big seed":   {"audioRecording": map[string]any{"audioMode": "Disabled", "audioSeed": 5e9, "updated": newer}},
++		"chemistry":  {"battery": map[string]any{"chemistry": "unobtainium", "updated": newer}},
++		"cell count": {"battery": map[string]any{"chemistry": "lipo", "manualCellCount": 2.5, "updated": newer}},
++	} {
++		t.Run(name, func(t *testing.T) {
++			// Along with a valid section, which is still applied.
++			invalid["thermalRecording"] = map[string]any{"useLowPowerMode": true, "updated": newer}
++			s, _ := newSyncService(t, deviceConfig, invalid)
++			require.NoError(t, s.sync())
++
++			assert.True(t, unmarshalSection[config.ThermalRecorder](t, s, config.ThermalRecorderKey).UseLowPowerMode)
++			windows := unmarshalSection[config.Windows](t, s, config.WindowsKey)
++			assert.Equal(t, []string{"09:00", "17:00"}, []string{windows.StartRecording, windows.StopRecording})
++			audio := unmarshalSection[config.AudioRecording](t, s, config.AudioRecordingKey)
++			assert.Equal(t, "AudioOnly", audio.AudioMode)
++			assert.Equal(t, uint32(7), audio.AudioSeed)
++			battery := unmarshalSection[config.Battery](t, s, config.BatteryKey)
++			assert.Equal(t, "lipo", battery.Chemistry)
++			assert.Equal(t, 3, battery.ManualCellCount)
++		})
++	}
++}
++
++func TestReadCurrentSettingsAfterSectionRemoved(t *testing.T) {
++	s, _ := newSyncService(t, `
++[windows]
++start-recording = "09:00"
++stop-recording = "17:00"
++updated = `+older+`
++`, nil)
++	_, err := s.readCurrentSettings()
++	require.NoError(t, err)
++
++	configFile := path.Join(configDir, config.ConfigFileName)
++	require.NoError(t, afero.WriteFile(syncFs, configFile, []byte("[device]\nid = 1\n"), 0o644))
++	settings, err := s.readCurrentSettings()
++	require.NoError(t, err)
++	assert.Equal(t, map[string]any{"startRecording": "", "stopRecording": "", "updated": time.Time{}}, settings["windows"])
++}
++
++// writeCountingFs counts the times files are opened for writing.
++type writeCountingFs struct {
++	afero.Fs
++	writes int
++}
++
++func (f *writeCountingFs) OpenFile(name string, flag int, perm os.FileMode) (afero.File, error) {
++	if flag&(os.O_WRONLY|os.O_RDWR) != 0 {
++		f.writes++
++	}
++	return f.Fs.OpenFile(name, flag, perm)
++}
++
++func (f *writeCountingFs) Create(name string) (afero.File, error) {
++	f.writes++
++	return f.Fs.Create(name)
++}
++
++func TestSyncWritesConfigOnce(t *testing.T) {
++	// Services restart or reload on each config change, so several sections
++	// from the API are written together.
++	s, _ := newSyncService(t, "", map[string]any{
++		"thermalRecording": map[string]any{"useLowPowerMode": true, "updated": newer},
++		"windows":          map[string]any{"startRecording": "22:00", "stopRecording": "06:00", "updated": newer},
++		"audioRecording":   map[string]any{"audioMode": "AudioOnly", "updated": newer},
++	})
++	fs := &writeCountingFs{Fs: syncFs}
++	config.SetFs(fs)
++	require.NoError(t, s.sync())
++	assert.Equal(t, 1, fs.writes)
++	assert.True(t, unmarshalSection[config.ThermalRecorder](t, s, config.ThermalRecorderKey).UseLowPowerMode)
++	assert.Equal(t, "22:00", unmarshalSection[config.Windows](t, s, config.WindowsKey).StartRecording)
++	assert.Equal(t, "AudioOnly", unmarshalSection[config.AudioRecording](t, s, config.AudioRecordingKey).AudioMode)
++}
