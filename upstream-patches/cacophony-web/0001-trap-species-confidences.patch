@@ -1,0 +1,181 @@
+diff --git a/browse-next/src/components/DeviceTrapSettings.vue b/browse-next/src/components/DeviceTrapSettings.vue
+index 002c148..b38c18c 100644
+--- a/browse-next/src/components/DeviceTrapSettings.vue
++++ b/browse-next/src/components/DeviceTrapSettings.vue
+@@ -31,7 +31,9 @@ import type {
+   DeviceModelOutput,
+   TrapMode,
+   TrapSettings,
++  TrapSpeciesConfidences,
+ } from "@typedefs/api/device";
++import { TrapSpeciesConfidence } from "@typedefs/api/consts.ts";
+ import { recordingWindowDescriptionForSettings } from "@/components/recordingWindowUtils.ts";
+ import { currentSelectedProject } from "@models/provides.ts";
+ import {
+@@ -85,9 +87,8 @@ const deviceId = Number(route.params.deviceId) as DeviceId;
+ 
+ const defaultTrapState = (): TrapSettings => ({
+   enabled: false,
+-  target: [],
+-  hasKillMechanism: false,
+-  protect: [],
++  target: {},
++  protect: {},
+   defaultState: "armed",
+   updated: new Date().toISOString(),
+ });
+@@ -130,15 +131,19 @@ watch(trapMode, (nextMode: TrapMode, prevMode: TrapMode) => {
+   }
+ });
+ 
++// Users choose the species, and each gets the confidence tuned for it.
++const withConfidences = (tags: DeviceModelOutput[]): TrapSpeciesConfidences =>
++  Object.fromEntries(tags.map((tag) => [tag, TrapSpeciesConfidence[tag]]));
++
+ const saveCaptureTargetTags = (tags: DeviceModelOutput[]) => {
+   settings.value!.trap = settings.value!.trap || defaultTrapState();
+-  settings.value!.trap.target = tags;
++  settings.value!.trap.target = withConfidences(tags);
+   settings.value!.trap.updated = new Date().toISOString();
+ };
+ 
+ const saveProtectTargetTags = (tags: DeviceModelOutput[]) => {
+   settings.value!.trap = settings.value!.trap || defaultTrapState();
+-  settings.value!.trap.protect = tags;
++  settings.value!.trap.protect = withConfidences(tags);
+   settings.value!.trap.updated = new Date().toISOString();
+ };
+ 
+@@ -159,10 +164,12 @@ const recordingWindow = computed<string | null>(() => {
+ });
+ 
+ const captureTargetTags = computed<DeviceModelOutput[]>(() => {
+-  return settings.value?.trap?.target || [];
++  return Object.keys(settings.value?.trap?.target || {}) as DeviceModelOutput[];
+ });
+ const protectTags = computed<DeviceModelOutput[]>(() => {
+-  return settings.value?.trap?.protect || [];
++  return Object.keys(
++    settings.value?.trap?.protect || {},
++  ) as DeviceModelOutput[];
+ });
+ 
+ const settingsUpdated = async (
+diff --git a/e2e-tests/tests/device-actions.spec.ts b/e2e-tests/tests/device-actions.spec.ts
+index d8fba43..688077f 100644
+--- a/e2e-tests/tests/device-actions.spec.ts
++++ b/e2e-tests/tests/device-actions.spec.ts
+@@ -28,10 +28,9 @@ test("A user sets trap configuration", async () => {
+   const device = new DeviceSim(deviceHandle);
+ 
+   const trapSettings: TrapSettings = {
+-    protect: [],
+-    target: [],
++    protect: {},
++    target: {},
+     defaultState: "armed",
+-    hasKillMechanism: true,
+     updated: addMinutes(initialDateTime, 1).toISOString(),
+     enabled: true,
+   };
+@@ -66,7 +65,7 @@ test("A user sets trap configuration", async () => {
+   await AdminUser.Devices.updateDeviceSettings(deviceHandle.id, {
+     trap: {
+       ...trapSettings,
+-      protect: ["bird"],
++      protect: { bird: 80 },
+       updated: addMinutes(initialDateTime, 2).toISOString(),
+     },
+   });
+@@ -92,10 +91,9 @@ test("A device polls for actions", async ({ smallCptv }) => {
+   const device = new DeviceSim(deviceHandle);
+   await confirmEmailAddressViaApi(userHandle);
+   const trapSettings: TrapSettings = {
+-    protect: ["bird"],
+-    target: ["possum", "cat"],
++    protect: { bird: 80 },
++    target: { possum: 80, cat: 80 },
+     defaultState: "armed",
+-    hasKillMechanism: true,
+     updated: addMinutes(initialDateTime, 1).toISOString(),
+     enabled: true,
+   };
+@@ -304,10 +302,9 @@ test("A user gets a notification email if there is a trap action pending, unless
+   const deviceHandle = project.getDevice();
+   const device = new DeviceSim(deviceHandle);
+   const trapSettings: TrapSettings = {
+-    protect: ["bird"],
+-    target: ["possum", "cat"],
++    protect: { bird: 80 },
++    target: { possum: 80, cat: 80 },
+     defaultState: "armed",
+-    hasKillMechanism: true,
+     updated: addMinutes(initialDateTime, 1).toISOString(),
+     enabled: true,
+   };
+diff --git a/types/api/consts.ts b/types/api/consts.ts
+index 35242d9..4ece000 100644
+--- a/types/api/consts.ts
++++ b/types/api/consts.ts
+@@ -46,6 +46,30 @@ export enum DeviceThermalModelOutputLabel {
+   wallaby = "wallaby",
+ }
+ 
++// The confidence from 0 to 100 that the device's classifier needs for each species
++// to trap or protect. They are tuned for the classifier, so aren't set by users.
++export const TrapSpeciesConfidence: Record<
++  DeviceThermalModelOutputLabel,
++  number
++> = {
++  bird: 80,
++  cat: 80,
++  deer: 80,
++  dog: 80,
++  "false-positive": 80,
++  hedgehog: 80,
++  human: 80,
++  kiwi: 80,
++  leporidae: 80,
++  mustelid: 80,
++  penguin: 80,
++  possum: 80,
++  rodent: 80,
++  sheep: 80,
++  vehicle: 80,
++  wallaby: 80,
++};
++
+ export enum ServerThermalModelOutputLabel {
+   bird = "bird",
+   cat = "cat",
+diff --git a/types/api/device.d.ts b/types/api/device.d.ts
+index f1c64d5..6afa208 100644
+--- a/types/api/device.d.ts
++++ b/types/api/device.d.ts
+@@ -1,6 +1,7 @@
+ import type {
+   DeviceId,
+   GroupId,
++  integer,
+   IsoFormattedDateString,
+   LatLng,
+   RecordingId,
+@@ -83,13 +84,15 @@ export type BatterySettings = {
+ export type DeviceModelOutput = keyof typeof DeviceThermalModelOutputLabel;
+ 
+ export type TrapMode = "armed" | "safe";
++// Species for a trap, each with the confidence from 0 to 100 that the device's
++// classifier needs to act on it (see TrapSpeciesConfidence).
++export type TrapSpeciesConfidences = Partial<Record<DeviceModelOutput, integer>>;
+ export type TrapSettings = {
+-  protect: DeviceModelOutput[];
+-  target: DeviceModelOutput[];
++  protect: TrapSpeciesConfidences;
++  target: TrapSpeciesConfidences;
+   // This setting is about whether the trap will trigger before there is any
+   // AI classification, or if it waits for a positive classification before triggering.
+   defaultState: TrapMode;
+-  hasKillMechanism: boolean;
+   enabled: boolean;
+ } & SettingsBase;
+ 

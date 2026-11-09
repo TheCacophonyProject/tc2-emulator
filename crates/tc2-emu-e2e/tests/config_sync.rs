@@ -1,14 +1,17 @@
-//! cacophony-config-sync keeps the power mode, recording window, audio recording
-//! and battery settings the same on the device and the API, where the web portal
-//! edits them. Whichever side changed a section last wins.
+//! cacophony-config-sync keeps the power mode, recording window, audio recording,
+//! battery and trap settings the same on the device and the API, where the web
+//! portal edits them. Whichever side changed a section last wins.
 //!
 //! Needs a freshly started emulator and the Cacophony API; run with `make e2e`.
+//! The trap tests need the API with species confidences in its trap settings
+//! (upstream-patches/cacophony-web).
 //!
-//! The emulator runs cacophony-config-sync with fixes from guest/patches/go-config.
-//! Without them: after Sidekick reregisters the device it syncs as the old device
-//! until it restarts, so these tests time out; battery settings from the portal
-//! have no effect, and "Auto-detect" never reaches the device; and invalid
-//! settings from the portal are written to the device's config, or stop the sync.
+//! The emulator runs cacophony-config-sync with fixes from guest/patches/go-config,
+//! and managementd built against them. Without them: after Sidekick reregisters
+//! the device it syncs as the old device until it restarts, so these tests time
+//! out; battery settings from the portal have no effect, and "Auto-detect" never
+//! reaches the device; invalid settings from the portal are written to the
+//! device's config, or stop the sync; and trap settings aren't synced at all.
 
 use serde_json::{Value, json};
 use std::thread::sleep;
@@ -386,5 +389,154 @@ fn newer_device_change_wins() -> anyhow::Result<()> {
     sleep(Duration::from_secs(30));
     assert_eq!(device_window(&device)?, want);
     assert_eq!(api_window(&device.settings()?), want);
+    Ok(())
+}
+
+/// Trap settings: enabled, the default state, then the species to trap and to
+/// protect, each a map of species to the confidence needed. "safe" arms the trap
+/// only while the camera classifies a species to trap and none to protect;
+/// "armed" triggers on motion alone, so the species have no effect, but they are
+/// kept for going back to "safe".
+type Trap = (bool, String, Value, Value);
+
+fn trap(enabled: bool, default_state: &str, target: Value, protect: Value) -> Trap {
+    (enabled, default_state.into(), target, protect)
+}
+
+/// Species with their confidences, with none as an empty map.
+fn species(value: &Value) -> Value {
+    if value.is_null() { json!({}) } else { value.clone() }
+}
+
+/// The device's trap settings, from its config.
+fn device_trap(device: &TestDevice) -> anyhow::Result<Trap> {
+    let config = device.managementd.config()?;
+    let trap = &config["trap"];
+    Ok((
+        trap["Enabled"].as_bool().unwrap_or_default(),
+        trap["DefaultState"].as_str().unwrap_or_default().into(),
+        species(&trap["TargetSpecies"]),
+        species(&trap["ProtectSpecies"]),
+    ))
+}
+
+/// The settings the device sends the trap, which aren't synced.
+fn device_trap_config(device: &TestDevice) -> anyhow::Result<Value> {
+    Ok(device.managementd.config()?["trap"]["Config"].clone())
+}
+
+fn api_trap(settings: &Value) -> Trap {
+    let trap = &settings["trap"];
+    (
+        trap["enabled"].as_bool().unwrap_or_default(),
+        trap["defaultState"].as_str().unwrap_or_default().into(),
+        species(&trap["target"]),
+        species(&trap["protect"]),
+    )
+}
+
+/// The portal's trap section. It sends the whole section, with each species'
+/// tuned confidence.
+fn portal_trap((enabled, default_state, target, protect): &Trap) -> Value {
+    json!({
+        "enabled": enabled,
+        "defaultState": default_state,
+        "target": target,
+        "protect": protect,
+        "updated": now_iso(),
+    })
+}
+
+/// Enabled and armed with species kept, then waiting for the AI, with a species
+/// removed, then disabled.
+fn trap_cases() -> [Trap; 4] {
+    [
+        trap(true, "armed", json!({ "possum": 80, "cat": 80 }), json!({ "kiwi": 80 })),
+        trap(true, "safe", json!({ "possum": 80, "cat": 80 }), json!({ "kiwi": 80 })),
+        trap(true, "safe", json!({ "possum": 80 }), json!({})),
+        trap(false, "armed", json!({}), json!({})),
+    ]
+}
+
+#[test]
+#[ignore = "needs a running emulator and API; run with `make e2e`"]
+fn portal_trap_syncs_to_device() -> anyhow::Result<()> {
+    let device = set_up()?;
+    // The trap's own settings, which the device sends it as they are.
+    let trap_config = json!({ "cage_doors": 2 });
+    device.managementd.set_config("trap", json!({ "config": trap_config }))?;
+    next_second();
+
+    for case in trap_cases() {
+        device
+            .user
+            .update_device_settings(device.device_id, json!({ "trap": portal_trap(&case) }))?;
+        device.managementd.trigger_config_sync()?;
+
+        let got = wait_for_device("portal trap settings to reach the device", &case, || {
+            device_trap(&device)
+        })?;
+        println!("Device now has {got:?}");
+        assert_eq!(device_trap_config(&device)?, trap_config);
+    }
+    Ok(())
+}
+
+#[test]
+#[ignore = "needs a running emulator and API; run with `make e2e`"]
+fn device_trap_syncs_to_portal() -> anyhow::Result<()> {
+    let device = set_up()?;
+
+    for case in trap_cases() {
+        // Set the way Sidekick sets config sections.
+        let (enabled, default_state, target, protect) = &case;
+        device.managementd.set_config(
+            "trap",
+            json!({
+                "enabled": enabled,
+                "default-state": default_state,
+                "target-species": target,
+                "protect-species": protect,
+            }),
+        )?;
+
+        let got = wait_for_device("device trap settings to reach the API", &case, || {
+            Ok(api_trap(&device.settings()?))
+        })?;
+        println!("API now has {got:?}");
+    }
+    Ok(())
+}
+
+#[test]
+#[ignore = "needs a running emulator and API; run with `make e2e`"]
+fn invalid_portal_trap_settings_are_ignored() -> anyhow::Result<()> {
+    let device = set_up()?;
+    device.managementd.set_config("thermal-recorder", json!({ "use-low-power-mode": false }))?;
+    let before = trap(true, "safe", json!({ "possum": 80 }), json!({ "kiwi": 80 }));
+    device
+        .user
+        .update_device_settings(device.device_id, json!({ "trap": portal_trap(&before) }))?;
+    device.managementd.trigger_config_sync()?;
+    wait_for_device("the trap settings to reach the device", &before, || device_trap(&device))?;
+
+    // The API takes any whole number as a confidence. The power mode is valid, so
+    // is still applied.
+    let updated = now_iso();
+    let mut invalid = portal_trap(&trap(false, "armed", json!({ "possum": 101 }), json!({})));
+    invalid["updated"] = updated.clone().into();
+    device.user.update_device_settings(
+        device.device_id,
+        json!({
+            "thermalRecording": { "useLowPowerMode": true, "updated": updated },
+            "trap": invalid,
+        }),
+    )?;
+    device.managementd.trigger_config_sync()?;
+    wait_for_device("the valid setting to reach the device", &true, || {
+        Ok(device.managementd.config()?["thermalRecorder"]["UseLowPowerMode"].as_bool()
+            == Some(true))
+    })?;
+    assert_eq!(device_trap(&device)?, before);
     Ok(())
 }

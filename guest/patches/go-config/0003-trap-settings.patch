@@ -1,0 +1,396 @@
+diff --git a/internal/cacophony-config-sync/main.go b/internal/cacophony-config-sync/main.go
+index 71c38ea..3ee998a 100644
+--- a/internal/cacophony-config-sync/main.go
++++ b/internal/cacophony-config-sync/main.go
+@@ -25,6 +25,7 @@ import (
+ 	"os"
+ 	"path/filepath"
+ 	"reflect"
++	"slices"
+ 	"strings"
+ 	"time"
+ 
+@@ -133,6 +134,62 @@ func batteryToAPI(conf any, settings map[string]any) {
+ 	}
+ }
+ 
++// oneOf validates that a value is one of the given strings.
++func oneOf(values ...string) func(any) error {
++	return func(value any) error {
++		s, ok := value.(string)
++		if !ok || !slices.Contains(values, s) {
++			return fmt.Errorf("expected one of %q, got %v", values, value)
++		}
++		return nil
++	}
++}
++
++// speciesConfidences validates species with the confidence needed for each, as
++// the API gives them, a map of species names to whole numbers from 0 to 100.
++func speciesConfidences(value any) error {
++	species, ok := value.(map[string]any)
++	if !ok {
++		return fmt.Errorf("expected a map of species to confidences, got %T", value)
++	}
++	validConfidence := wholeNumberIn(0, 100)
++	for animal, confidence := range species {
++		if err := validConfidence(confidence); err != nil {
++			return fmt.Errorf("confidence for %s: %w", animal, err)
++		}
++	}
++	return nil
++}
++
++// trapFromAPI clears the species lists the API leaves out, since the API
++// replaces the whole trap section when it is changed.
++func trapFromAPI(settings map[string]any) {
++	for _, key := range []string{"target-species", "protect-species"} {
++		if _, ok := settings[key]; !ok {
++			settings[key] = map[string]any{}
++		}
++	}
++}
++
++// trapToAPI always reports the default state and both species lists, as the API
++// requires them. The lists are made non-nil so that they aren't left out as empty
++// when uploaded.
++func trapToAPI(conf any, settings map[string]any) {
++	trap := conf.(*config.Trap)
++	if trap.DefaultState == "" {
++		settings["defaultState"] = config.TrapArmed
++	}
++	for apiKey, species := range map[string]map[string]int32{
++		"target":  trap.TargetSpecies,
++		"protect": trap.ProtectSpecies,
++	} {
++		if species == nil {
++			species = map[string]int32{}
++		}
++		settings[apiKey] = species
++	}
++}
++
+ // Sections is a slice of Section
+ type Sections []Section
+ 
+@@ -246,6 +303,44 @@ var ConfigSections = Sections{
+ 		FromAPI: batteryFromAPI,
+ 		ToAPI:   batteryToAPI,
+ 	},
++	{
++		Name:   "trap",
++		Key:    config.TrapKey,
++		Config: &config.Trap{},
++		Mappings: []Mapping{
++			{
++				APIKey:    "enabled",
++				ConfigKey: "Enabled",
++				MapKey:    "enabled",
++			},
++			{
++				APIKey:    "defaultState",
++				ConfigKey: "DefaultState",
++				MapKey:    "default-state",
++				Validate:  oneOf(config.TrapArmed, config.TrapSafe),
++			},
++			{
++				APIKey:    "target",
++				ConfigKey: "TargetSpecies",
++				MapKey:    "target-species",
++				Validate:  speciesConfidences,
++			},
++			{
++				APIKey:    "protect",
++				ConfigKey: "ProtectSpecies",
++				MapKey:    "protect-species",
++				Validate:  speciesConfidences,
++			},
++			{
++				APIKey:    "updated",
++				ConfigKey: "Updated",
++				MapKey:    "updated",
++				Converter: stringToTimeConverter,
++			},
++		},
++		FromAPI: trapFromAPI,
++		ToAPI:   trapToAPI,
++	},
+ }
+ 
+ type CacophonyAPIInterface interface {
+diff --git a/internal/cacophony-config-sync/main_test.go b/internal/cacophony-config-sync/main_test.go
+index 71a9fc8..d05a6e2 100644
+--- a/internal/cacophony-config-sync/main_test.go
++++ b/internal/cacophony-config-sync/main_test.go
+@@ -552,6 +552,115 @@ updated = ` + older + `
+ 	}
+ }
+ 
++func TestSyncTrapFromPortal(t *testing.T) {
++	// The trap's own config, sent to it by tc2-hat-comms, isn't synced.
++	s, api := newSyncService(t, `
++[trap]
++config = {cage_doors = 2}
++updated = `+older+`
++`, map[string]any{
++		"trap": map[string]any{
++			"enabled":      true,
++			"defaultState": "safe",
++			"target":       map[string]any{"possum": 80, "cat": 75},
++			"protect":      map[string]any{"kiwi": 80},
++			"updated":      newer,
++		},
++	})
++	require.NoError(t, s.sync())
++	trap := unmarshalSection[config.Trap](t, s, config.TrapKey)
++	assert.True(t, trap.Enabled)
++	assert.Equal(t, config.TrapSafe, trap.DefaultState)
++	assert.Equal(t, map[string]int32{"possum": 80, "cat": 75}, trap.TargetSpecies)
++	assert.Equal(t, map[string]int32{"kiwi": 80}, trap.ProtectSpecies)
++	assert.Equal(t, map[string]any{"cage_doors": int64(2)}, trap.Config)
++
++	// A species is removed, and the protect list left out, which clears it.
++	api.settings["trap"] = map[string]any{
++		"enabled":      false,
++		"defaultState": "armed",
++		"target":       map[string]any{"possum": 80},
++		"updated":      time.Now().Add(time.Hour).Format(time.RFC3339Nano),
++	}
++	require.NoError(t, s.sync())
++	trap = unmarshalSection[config.Trap](t, s, config.TrapKey)
++	assert.False(t, trap.Enabled)
++	assert.Equal(t, config.TrapArmed, trap.DefaultState)
++	assert.Equal(t, map[string]int32{"possum": 80}, trap.TargetSpecies)
++	assert.Empty(t, trap.ProtectSpecies)
++	assert.Equal(t, map[string]any{"cage_doors": int64(2)}, trap.Config)
++}
++
++func TestSyncTrapToPortal(t *testing.T) {
++	s, api := newSyncService(t, `
++[trap]
++enabled = true
++default-state = "safe"
++target-species = {possum = 80, rodent = 60}
++config = {cage_doors = 2}
++updated = `+newer+`
++`, map[string]any{
++		"trap": map[string]any{"enabled": false, "target": map[string]any{"cat": 80}, "updated": older},
++	})
++	require.NoError(t, s.sync())
++	assert.Equal(t, map[string]any{
++		"enabled":      true,
++		"defaultState": "safe",
++		"target":       map[string]any{"possum": float64(80), "rodent": float64(60)},
++		// The API requires both lists, so an empty one is sent too.
++		"protect": map[string]any{},
++		"updated": "2025-06-01T00:00:00.123Z",
++	}, api.uploaded["trap"])
++	assert.Equal(t, api.uploaded["trap"], api.settings["trap"])
++
++	// Just enabled on the device, with the default state.
++	s, api = newSyncService(t, `
++[trap]
++enabled = true
++updated = `+newer+`
++`, nil)
++	require.NoError(t, s.sync())
++	assert.Equal(t, map[string]any{
++		"enabled":      true,
++		"defaultState": "armed",
++		"target":       map[string]any{},
++		"protect":      map[string]any{},
++		"updated":      "2025-06-01T00:00:00.123Z",
++	}, api.uploaded["trap"])
++}
++
++func TestSyncIgnoresInvalidAPITrapSettings(t *testing.T) {
++	deviceConfig := `
++[trap]
++enabled = true
++default-state = "safe"
++target-species = {possum = 80}
++updated = ` + older + `
++`
++	for name, invalid := range map[string]map[string]any{
++		"default state":       {"defaultState": "maybe"},
++		"confidence too high": {"target": map[string]any{"possum": 101}},
++		"negative confidence": {"protect": map[string]any{"kiwi": -1}},
++		"fractional":          {"target": map[string]any{"possum": 80.5}},
++		"confidence string":   {"target": map[string]any{"possum": "high"}},
++		"species list":        {"target": []any{"possum"}},
++		"trap and protect":    {"target": map[string]any{"kiwi": 80}, "protect": map[string]any{"kiwi": 80}},
++	} {
++		t.Run(name, func(t *testing.T) {
++			invalid["enabled"] = false
++			invalid["updated"] = newer
++			s, _ := newSyncService(t, deviceConfig, map[string]any{"trap": invalid})
++			require.NoError(t, s.sync())
++
++			trap := unmarshalSection[config.Trap](t, s, config.TrapKey)
++			assert.True(t, trap.Enabled)
++			assert.Equal(t, config.TrapSafe, trap.DefaultState)
++			assert.Equal(t, map[string]int32{"possum": 80}, trap.TargetSpecies)
++			assert.Empty(t, trap.ProtectSpecies)
++		})
++	}
++}
++
+ func TestReadCurrentSettingsAfterSectionRemoved(t *testing.T) {
+ 	s, _ := newSyncService(t, `
+ [windows]
+diff --git a/trap.go b/trap.go
+index af882bc..80d4488 100644
+--- a/trap.go
++++ b/trap.go
+@@ -8,11 +8,21 @@ import (
+ 
+ const TrapKey = "trap"
+ 
++// Trap default states.
++const (
++	// TrapArmed has the trap trigger on any movement, ignoring classifications, so the
++	// species to trap and protect have no effect.
++	TrapArmed = "armed"
++	// TrapSafe has the trap arm only while a species to trap has been classified, and
++	// no species to protect.
++	TrapSafe = "safe"
++)
++
+ func init() {
+ 	allSections[TrapKey] = section{
+ 		key:         TrapKey,
+ 		mapToStruct: trapMapToStruct,
+-		validate:    noValidateFunc,
++		validate:    trapValidateFunc,
+ 		defaultValue: func() any {
+ 			return DefaultTrap()
+ 		},
+@@ -23,12 +33,23 @@ func init() {
+ }
+ 
+ type Trap struct {
+-	Config map[string]any `mapstructure:"config"`
++	// Enabled is set when the camera is controlling a trap, as set on the web portal.
++	Enabled bool `mapstructure:"enabled"`
++	// DefaultState is TrapArmed or TrapSafe, with TrapArmed when it's empty.
++	DefaultState string `mapstructure:"default-state"`
++	// TargetSpecies are the species to trap, with the confidence needed for each.
++	TargetSpecies map[string]int32 `mapstructure:"target-species"`
++	// ProtectSpecies are the species that disable the trap, with the confidence needed for each.
++	ProtectSpecies map[string]int32 `mapstructure:"protect-species"`
++	// Config is sent to the trap as its config.json.
++	Config  map[string]any `mapstructure:"config"`
++	Updated any            `mapstructure:"updated,omitempty"`
+ }
+ 
+ func DefaultTrap() Trap {
+ 	return Trap{
+-		Config: map[string]any{},
++		DefaultState: TrapArmed,
++		Config:       map[string]any{},
+ 	}
+ }
+ 
+@@ -40,6 +61,33 @@ func trapMapToStruct(m map[string]any) (any, error) {
+ 	return s, nil
+ }
+ 
++// trapValidateFunc validates a trap section, which can be just the keys being set.
++func trapValidateFunc(trap any) error {
++	t, err := ConvertToStruct[Trap](trap)
++	if err != nil {
++		return err
++	}
++	if t.DefaultState != "" && t.DefaultState != TrapArmed && t.DefaultState != TrapSafe {
++		return fmt.Errorf("default state must be %q or %q, got %q", TrapArmed, TrapSafe, t.DefaultState)
++	}
++	for _, species := range []map[string]int32{t.TargetSpecies, t.ProtectSpecies} {
++		for animal, confidence := range species {
++			if animal == "" {
++				return fmt.Errorf("species name can't be empty")
++			}
++			if confidence < 0 || confidence > 100 {
++				return fmt.Errorf("confidence for %s must be from 0 to 100, got %d", animal, confidence)
++			}
++		}
++	}
++	for animal := range t.TargetSpecies {
++		if _, ok := t.ProtectSpecies[animal]; ok {
++			return fmt.Errorf("%s can't be both a species to trap and to protect", animal)
++		}
++	}
++	return nil
++}
++
+ func jsonStringToMap(f reflect.Type, t reflect.Type, data any) (any, error) {
+ 	if f.Kind() != reflect.String || t != reflect.TypeFor[map[string]any]() {
+ 		return data, nil
+diff --git a/trap_test.go b/trap_test.go
+new file mode 100644
+index 0000000..b3f60f0
+--- /dev/null
++++ b/trap_test.go
+@@ -0,0 +1,63 @@
++package config
++
++import (
++	"testing"
++
++	"github.com/stretchr/testify/assert"
++	"github.com/stretchr/testify/require"
++)
++
++func TestTrapValidate(t *testing.T) {
++	assert.NoError(t, trapValidateFunc(DefaultTrap()))
++	// Just some of the keys, as when setting part of the section.
++	assert.NoError(t, trapValidateFunc(map[string]any{"enabled": true}))
++	assert.NoError(t, trapValidateFunc(map[string]any{
++		"default-state":   TrapSafe,
++		"target-species":  map[string]any{"possum": 80},
++		"protect-species": map[string]any{"kiwi": 100, "bird": 0},
++		"config":          map[string]any{"cage_doors": 2},
++	}))
++
++	for name, invalid := range map[string]map[string]any{
++		"default state":    {"default-state": "maybe"},
++		"confidence":       {"target-species": map[string]any{"possum": 101}},
++		"negative":         {"protect-species": map[string]any{"kiwi": -1}},
++		"empty species":    {"target-species": map[string]any{"": 80}},
++		"trap and protect": {"target-species": map[string]any{"kiwi": 80}, "protect-species": map[string]any{"kiwi": 80}},
++		// SetFromMap converts a JSON string first; set as is, it couldn't be read back.
++		"config":           {"config": `{"cage_doors": 2}`},
++		"unknown key":      {"not-a-key": true},
++	} {
++		assert.Error(t, trapValidateFunc(invalid), name)
++	}
++}
++
++func TestSetTrap(t *testing.T) {
++	defer newFs(t, "")()
++	conf, err := New(DefaultConfigDir)
++	require.NoError(t, err)
++
++	// SetFromMap takes the config as a JSON string.
++	require.NoError(t, conf.SetFromMap(TrapKey, map[string]any{"config": `{"cage_doors": 2}`}, false))
++	require.NoError(t, conf.SetMultipleSections(map[string]any{
++		"trap": map[string]any{
++			"enabled":        true,
++			"target-species": map[string]any{"possum": 80, "cat": 80},
++		},
++	}))
++	require.NoError(t, conf.SetFromMap(TrapKey, map[string]any{
++		"default-state":  TrapSafe,
++		"target-species": map[string]any{"possum": 70},
++	}, false))
++	require.Error(t, conf.SetFromMap(TrapKey, map[string]any{"default-state": "maybe"}, false))
++
++	conf, err = New(DefaultConfigDir)
++	require.NoError(t, err)
++	var trap Trap
++	require.NoError(t, conf.Unmarshal(TrapKey, &trap))
++	assert.True(t, trap.Enabled)
++	assert.Equal(t, TrapSafe, trap.DefaultState)
++	// Species maps are replaced, not added to.
++	assert.Equal(t, map[string]int32{"possum": 70}, trap.TargetSpecies)
++	assert.Equal(t, map[string]any{"cage_doors": float64(2)}, trap.Config)
++}

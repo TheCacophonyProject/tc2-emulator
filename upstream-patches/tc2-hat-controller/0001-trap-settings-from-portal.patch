@@ -1,0 +1,114 @@
+diff --git a/internal/tc2-hat-comms/config.go b/internal/tc2-hat-comms/config.go
+index 7cc26ba..5aaad1b 100644
+--- a/internal/tc2-hat-comms/config.go
++++ b/internal/tc2-hat-comms/config.go
+@@ -47,12 +47,40 @@ func ParseCommsConfig(configDir string) (*CommsConfig, error) {
+ 		return nil, err
+ 	}
+ 
+-	return &CommsConfig{
++	commsConfig := &CommsConfig{
+ 		Comms:          c,
+ 		TrapSpecies:    tracks.Species(c.TrapSpecies),
+ 		ProtectSpecies: tracks.Species(c.ProtectSpecies),
+ 		UartTxPin:      gpio.UartTx,
+ 		TrapConfig:     trap,
+ 		LowPowerMode:   recorder.UseLowPowerMode,
+-	}, nil
++	}
++	applyTrapSettings(commsConfig)
++	return commsConfig, nil
++}
++
++// applyTrapSettings controls the trap with the trap settings, as set on the web portal,
++// when they enable it. The trap then has the UART, whatever output the comms settings are
++// for, as only one output can use it. Otherwise the comms settings are used as they are.
++func applyTrapSettings(c *CommsConfig) {
++	trap := c.TrapConfig
++	if !trap.Enabled {
++		return
++	}
++	if c.Enable && c.CommsOut != "trap-control" && c.CommsOut != "uart" {
++		log.Warnf("The trap is enabled, so it is controlled instead of the '%s' output in the comms settings", c.CommsOut)
++	}
++	c.Enable = true
++	c.CommsOut = "trap-control"
++	if trap.DefaultState == config.TrapSafe {
++		// Enabled only while a species to trap has been seen, and not one to protect.
++		c.TrapEnabledByDefault = false
++		c.TrapSpecies = tracks.Species(trap.TargetSpecies)
++		c.ProtectSpecies = tracks.Species(trap.ProtectSpecies)
++	} else {
++		// Armed: always enabled, triggering on motion alone, whatever is classified.
++		c.TrapEnabledByDefault = true
++		c.TrapSpecies = nil
++		c.ProtectSpecies = nil
++	}
+ }
+diff --git a/internal/tc2-hat-comms/config_test.go b/internal/tc2-hat-comms/config_test.go
+new file mode 100644
+index 0000000..6b7833c
+--- /dev/null
++++ b/internal/tc2-hat-comms/config_test.go
+@@ -0,0 +1,61 @@
++package comms
++
++import (
++	"testing"
++	"time"
++
++	"github.com/TheCacophonyProject/go-config"
++	"github.com/TheCacophonyProject/tc2-hat-controller/tracks"
++	"github.com/stretchr/testify/assert"
++)
++
++func TestApplyTrapSettings(t *testing.T) {
++	// Comms set up on the camera, such as by Sidekick.
++	atESL := func() *CommsConfig {
++		return &CommsConfig{
++			Comms: config.Comms{
++				Enable:          true,
++				CommsOut:        "at-esl",
++				TrapDuration:    2 * time.Minute,
++				ProtectDuration: 5 * time.Minute,
++			},
++			TrapSpecies:    tracks.Species{"cat": 70},
++			ProtectSpecies: tracks.Species{"bird": 50},
++		}
++	}
++
++	// The trap isn't enabled, so the comms settings are used.
++	c := atESL()
++	c.TrapConfig = config.Trap{TargetSpecies: map[string]int32{"possum": 80}}
++	applyTrapSettings(c)
++	assert.Equal(t, "at-esl", c.CommsOut)
++	assert.Equal(t, tracks.Species{"cat": 70}, c.TrapSpecies)
++
++	for _, test := range []struct {
++		defaultState     string
++		enabledByDefault bool
++		// Armed ignores classifications, so the species have no effect.
++		trapSpecies, protectSpecies tracks.Species
++	}{
++		{config.TrapArmed, true, nil, nil},
++		{config.TrapSafe, false, tracks.Species{"possum": 80}, tracks.Species{"kiwi": 80}},
++		{"", true, nil, nil},
++	} {
++		c := atESL()
++		c.TrapConfig = config.Trap{
++			Enabled:        true,
++			DefaultState:   test.defaultState,
++			TargetSpecies:  map[string]int32{"possum": 80},
++			ProtectSpecies: map[string]int32{"kiwi": 80},
++		}
++		applyTrapSettings(c)
++		assert.True(t, c.Enable)
++		assert.Equal(t, "trap-control", c.CommsOut)
++		assert.Equal(t, test.enabledByDefault, c.TrapEnabledByDefault, "default state %q", test.defaultState)
++		assert.Equal(t, test.trapSpecies, c.TrapSpecies, "default state %q", test.defaultState)
++		assert.Equal(t, test.protectSpecies, c.ProtectSpecies, "default state %q", test.defaultState)
++		// The portal doesn't set durations, so the comms ones are kept.
++		assert.Equal(t, 2*time.Minute, c.TrapDuration)
++		assert.Equal(t, 5*time.Minute, c.ProtectDuration)
++	}
++}

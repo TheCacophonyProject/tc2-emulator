@@ -79,6 +79,19 @@ build/guest/cacophony-config-utils: scripts/build-go-config.sh guest/versions/pa
 		golang:1.25-bookworm /src/scripts/build-go-config.sh /src/target/docker/cacophony-config-utils
 	$(INSTALL) -D -t build/guest target/docker/cacophony-config-utils
 
+# Released managementd built against the patched go-config above, so that it
+# handles the config it adds, as for Sidekick.
+stubs: build/guest/managementd
+build/guest/managementd: scripts/build-managementd.sh guest/versions/packages.txt $(wildcard guest/patches/go-config/*) | stubs-builder
+	docker run --rm -u $(shell id -u):$(shell id -g) -v $(CURDIR):/src -e HOME=/tmp \
+		-e npm_config_cache=/src/target/docker/npm-cache \
+		node:24-bookworm /src/scripts/build-managementd.sh ts /src/target/docker/managementd-src
+	docker run --rm -u $(shell id -u):$(shell id -g) -v $(CURDIR):/src -e HOME=/tmp \
+		-e GOCACHE=/src/target/docker/go-cache -e GOMODCACHE=/src/target/docker/go-mod \
+		-e GOPATH=/src/target/docker/go-path -e GOFLAGS=-buildvcs=false \
+		golang:1.25-bookworm /src/scripts/build-managementd.sh go /src/target/docker/managementd-src /src/target/docker/managementd
+	$(INSTALL) -D -t build/guest target/docker/managementd
+
 build:
 	docker compose build
 
