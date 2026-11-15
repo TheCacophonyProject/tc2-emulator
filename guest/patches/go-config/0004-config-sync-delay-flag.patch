@@ -1,0 +1,64 @@
+diff --git a/internal/cacophony-config-sync/main.go b/internal/cacophony-config-sync/main.go
+index 3ee998a..b235926 100644
+--- a/internal/cacophony-config-sync/main.go
++++ b/internal/cacophony-config-sync/main.go
+@@ -771,6 +771,7 @@ var (
+ )
+ 
+ type Args struct {
++	SyncDelay time.Duration `arg:"--sync-delay" default:"10s" help:"how long to wait after the config file changes before syncing, restarting if it changes again"`
+ 	logging.LogArgs
+ }
+ 
+@@ -808,7 +809,7 @@ func Run(inputArgs []string, ver string) error {
+ 	log.Info("Running version: ", version)
+ 
+ 	// Making runSyncChannel, string returned is the reason for the sync.
+-	runSyncChannel := makeSyncChannel()
++	runSyncChannel := makeSyncChannel(args.SyncDelay)
+ 
+ 	syncService, err := NewSyncService()
+ 	if err != nil {
+@@ -860,7 +861,7 @@ func Run(inputArgs []string, ver string) error {
+ 	}
+ }
+ 
+-func makeSyncChannel() chan string {
++func makeSyncChannel(syncDelay time.Duration) chan string {
+ 	// Make channel that will trigger a sync, the string is the reason for the sync.
+ 	c := make(chan string, 10)
+ 
+@@ -911,13 +912,13 @@ func makeSyncChannel() chan string {
+ 		fileChange := false
+ 		for {
+ 			// This select with the timeout is used so if the config file is changed, it will wait
+-			// 10 seconds before triggering the sync, and any more config changes will restart the timer.
++			// syncDelay before triggering the sync, and any more config changes will restart the timer.
+ 			// This is so you won't get lots of sync calls when someone is on sidekick and changing the config lots
+ 			select {
+ 			case <-fsEvents:
+ 				fileChange = true
+-				log.Info("Config file changes, waiting 10 seconds until triggering sync.")
+-			case <-time.After(10 * time.Second):
++				log.Infof("Config file changes, waiting %v until triggering sync.", syncDelay)
++			case <-time.After(syncDelay):
+ 				if fileChange {
+ 					log.Info("Triggering sync from config change.")
+ 					c <- "config file changed"
+diff --git a/internal/cacophony-config-sync/main_test.go b/internal/cacophony-config-sync/main_test.go
+index 9a860df..97bee88 100644
+--- a/internal/cacophony-config-sync/main_test.go
++++ b/internal/cacophony-config-sync/main_test.go
+@@ -717,3 +717,12 @@ func TestSyncWritesConfigOnce(t *testing.T) {
+ 	assert.Equal(t, "22:00", unmarshalSection[config.Windows](t, s, config.WindowsKey).StartRecording)
+ 	assert.Equal(t, "AudioOnly", unmarshalSection[config.AudioRecording](t, s, config.AudioRecordingKey).AudioMode)
+ }
++
++func TestSyncDelayArg(t *testing.T) {
++	args, err := procArgs(nil)
++	require.NoError(t, err)
++	assert.Equal(t, 10*time.Second, args.SyncDelay)
++	args, err = procArgs([]string{"--sync-delay", "100ms"})
++	require.NoError(t, err)
++	assert.Equal(t, 100*time.Millisecond, args.SyncDelay)
++}

@@ -130,8 +130,8 @@ echo "tc2-emu $EMU_DIR 9p trans=virtio,version=9p2000.L,ro,nofail 0 0" >> /etc/f
 # Run stubs from the share in place of services that need hardware: I2C goes to
 # the emulated devices in tc2-emu-hw, and tc2-emu-agent fakes the RP2040 side of
 # tc2-agent (or tc2-agent-launcher runs the real one against an emulated RP2040).
-# tc2-hat-attiny and cacophony-config-sync run builds with guest/patches applied,
-# and managementd one built against the patched go-config.
+# tc2-hat-attiny, cacophony-config-sync and managementd run builds with
+# guest/patches applied, managementd's against the patched go-config.
 replace_service() {
     mkdir -p "/etc/systemd/system/$1.service.d"
     cat > "/etc/systemd/system/$1.service.d/tc2-emu.conf" <<EOF
@@ -146,7 +146,7 @@ EOF
 replace_service tc2-hat-i2c tc2-hat-i2c-launcher
 replace_service tc2-agent tc2-agent-launcher
 replace_service tc2-hat-attiny "tc2-hat-controller attiny"
-replace_service cacophony-config-sync "cacophony-config-utils sync"
+replace_service cacophony-config-sync cacophony-config-sync-launcher
 replace_service managementd managementd
 
 for svc in "${DISABLED_SERVICES[@]}"; do
@@ -216,7 +216,9 @@ rm -f /etc/resolv.conf
 echo 'nameserver 127.0.0.1' > /etc/resolv.conf
 
 # Register with the test API rather than production. The group and name can be
-# set with tc2-emu.group= and tc2-emu.name= on the kernel command line.
+# set with tc2-emu.group= and tc2-emu.name= on the kernel command line. Runs the
+# patched device-register from the share, which starts the services that need a
+# registered device rather than rebooting, as the patched release's unit does.
 cat > /usr/local/bin/tc2-emu-device-register <<EOF
 #!/bin/sh
 group=new
@@ -227,12 +229,15 @@ for arg in \$(cat /proc/cmdline); do
         tc2-emu.name=*) name=\${arg#*=} ;;
     esac
 done
-exec /usr/bin/device-register --reboot --retry-until-registered --api $API_URL \\
+exec $EMU_DIR/guest/device-register --start-services --retry-until-registered --api $API_URL \\
     --group "\$group" \${name:+--name "\$name"}
 EOF
 chmod +x /usr/local/bin/tc2-emu-device-register
 mkdir -p /etc/systemd/system/device-register.service.d
-cat > /etc/systemd/system/device-register.service.d/tc2-emu.conf <<'EOF'
+cat > /etc/systemd/system/device-register.service.d/tc2-emu.conf <<EOF
+[Unit]
+RequiresMountsFor=$EMU_DIR
+
 [Service]
 ExecStart=
 ExecStart=/usr/local/bin/tc2-emu-device-register

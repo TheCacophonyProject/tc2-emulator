@@ -79,10 +79,11 @@ build/guest/cacophony-config-utils: scripts/build-go-config.sh guest/versions/pa
 		golang:1.25-bookworm /src/scripts/build-go-config.sh /src/target/docker/cacophony-config-utils
 	$(INSTALL) -D -t build/guest target/docker/cacophony-config-utils
 
-# Released managementd built against the patched go-config above, so that it
-# handles the config it adds, as for Sidekick.
+# Released managementd with guest/patches applied, built against the patched
+# go-config above, so that it handles the config it adds, as for Sidekick, and
+# the patched go-api, which writes the config when managementd reregisters.
 stubs: build/guest/managementd
-build/guest/managementd: scripts/build-managementd.sh guest/versions/packages.txt $(wildcard guest/patches/go-config/*) | stubs-builder
+build/guest/managementd: scripts/build-managementd.sh guest/versions/packages.txt $(wildcard guest/patches/go-config/*) $(wildcard guest/patches/go-api/*) $(wildcard guest/patches/management-interface/*) | stubs-builder
 	docker run --rm -u $(shell id -u):$(shell id -g) -v $(CURDIR):/src -e HOME=/tmp \
 		-e npm_config_cache=/src/target/docker/npm-cache \
 		node:24-bookworm /src/scripts/build-managementd.sh ts /src/target/docker/managementd-src
@@ -91,6 +92,17 @@ build/guest/managementd: scripts/build-managementd.sh guest/versions/packages.tx
 		-e GOPATH=/src/target/docker/go-path -e GOFLAGS=-buildvcs=false \
 		golang:1.25-bookworm /src/scripts/build-managementd.sh go /src/target/docker/managementd-src /src/target/docker/managementd
 	$(INSTALL) -D -t build/guest target/docker/managementd
+
+# Released device-register with guest/patches applied, built against the patched
+# go-api, so that it starts the services that need a registered device rather
+# than rebooting, until they're upstream.
+stubs: build/guest/device-register
+build/guest/device-register: scripts/build-device-register.sh guest/versions/packages.txt $(wildcard guest/patches/go-api/*) $(wildcard guest/patches/device-register/*) | stubs-builder
+	docker run --rm -u $(shell id -u):$(shell id -g) -v $(CURDIR):/src -e HOME=/tmp \
+		-e GOCACHE=/src/target/docker/go-cache -e GOMODCACHE=/src/target/docker/go-mod \
+		-e GOFLAGS=-buildvcs=false \
+		golang:1.25-bookworm /src/scripts/build-device-register.sh /src/target/docker/device-register
+	$(INSTALL) -D -t build/guest target/docker/device-register
 
 build:
 	docker compose build
@@ -114,8 +126,9 @@ E2E_HOST := http://host.docker.internal
 # order: new_device_setup needs the device as it first registers, and the others
 # move it to a group of their own.
 E2E_TESTS := new_device_setup config_sync
+# cacophony-config-sync waits only 100ms after config changes, rather than 10s.
 e2e: build stubs
-	docker compose up -d --force-recreate
+	TC2_CONFIG_SYNC_DELAY=100ms docker compose up -d --force-recreate
 	$(DOCKER_RUN) --add-host host.docker.internal:host-gateway \
 		-e TC2_E2E_API=$(E2E_HOST):1080 -e TC2_E2E_MANAGEMENTD=$(E2E_HOST):8080 \
 		-e CARGO_HOME=/src/target/docker/cargo-home -e CARGO_TARGET_DIR=/src/target/docker \

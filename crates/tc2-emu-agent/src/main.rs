@@ -20,7 +20,6 @@ const DBUS_NAME: &str = "org.cacophony.TC2Agent";
 const DBUS_PATH: &str = "/org/cacophony/TC2Agent";
 /// How long the RP2040 takes to pick up a recording request from the ATtiny.
 const REQUEST_DELAY: Duration = Duration::from_secs(2);
-const SHORT_RECORDING: Duration = Duration::from_secs(10);
 const LONG_RECORDING: Duration = Duration::from_secs(60);
 
 #[derive(Parser)]
@@ -71,8 +70,8 @@ struct Recorder {
 impl Recorder {
     /// Steps through the statuses tc2-agent reports while the RP2040 records,
     /// then saves the recording. The status is already `Waiting...`.
-    fn record(&self, taking: Status, duration: Duration) {
-        std::thread::sleep(REQUEST_DELAY);
+    fn record(&self, taking: Status, request_delay: Duration, duration: Duration) {
+        std::thread::sleep(request_delay);
         *self.status.lock().unwrap() = taking;
         let started = Utc::now();
         std::thread::sleep(duration);
@@ -124,10 +123,10 @@ impl Agent {
 
     /// Callers poll the status straight after requesting a recording, so it
     /// changes before the reply.
-    fn start(&self, waiting: Status, taking: Status, duration: Duration) {
+    fn start(&self, waiting: Status, taking: Status, request_delay: Duration, duration: Duration) {
         *self.recorder.status.lock().unwrap() = waiting;
         let recorder = self.recorder.clone();
-        std::thread::spawn(move || recorder.record(taking, duration));
+        std::thread::spawn(move || recorder.record(taking, request_delay, duration));
     }
 }
 
@@ -149,10 +148,13 @@ impl Agent {
         } else if is_taking_long_recording(status) {
             "Already making a 1 minute recording"
         } else {
+            // Saved straight away rather than taking as long as a real one (10s),
+            // as nothing needs it to, and it keeps the e2e tests quick.
             self.start(
                 Status::WaitingToTakeTestRecording,
                 Status::TakingTestRecording,
-                SHORT_RECORDING,
+                Duration::ZERO,
+                Duration::ZERO,
             );
             "Asked for a test recording"
         }
@@ -170,6 +172,7 @@ impl Agent {
             self.start(
                 Status::WaitingToTakeLongRecording,
                 Status::TakingLongRecording,
+                REQUEST_DELAY,
                 LONG_RECORDING,
             );
             "Asked for a 1 minute recording"

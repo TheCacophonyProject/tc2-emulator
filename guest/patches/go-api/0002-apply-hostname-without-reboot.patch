@@ -1,0 +1,55 @@
+diff --git a/api_test.go b/api_test.go
+index 5259be2..40a2690 100644
+--- a/api_test.go
++++ b/api_test.go
+@@ -80,6 +80,8 @@ func TestMain(m *testing.M) {
+ 	setSaltGrains = func(_ saltutil.Grains) error {
+ 		return nil
+ 	}
++	// And not to change the hostname of the machine running the tests
++	applyHostname = func(_ string) {}
+ 	os.Exit(m.Run())
+ }
+ 
+diff --git a/config.go b/config.go
+index 3cee814..4ae6cd7 100644
+--- a/config.go
++++ b/config.go
+@@ -17,6 +17,7 @@ package api
+ 
+ import (
+ 	"fmt"
++	"os/exec"
+ 	"regexp"
+ 	"strings"
+ 
+@@ -170,6 +171,9 @@ func updateHostnameAndSaltGrains(device *CacophonyDevice) error {
+ 		return err
+ 	}
+ 
++	// Use the new hostname now rather than after a reboot.
++	applyHostname(device.hostname())
++
+ 	// Write the new salt grains.
+ 	grains := saltutil.Grains{
+ 		DeviceName: device.name,
+@@ -193,4 +197,19 @@ var setSaltGrains = func(grains saltutil.Grains) error {
+ 	return saltutil.SetGrains(grains, log)
+ }
+ 
++// applyHostname sets the running system's hostname, and restarts avahi-daemon so
++// that it advertises the device by the new name over mDNS, as Sidekick finds
++// devices by it. avahi-daemon only reads the hostname when it starts. Failures
++// are only logged, as the hostname files are written, so a reboot still applies
++// it. A variable for testing.
++var applyHostname = func(hostname string) {
++	if out, err := exec.Command("hostname", hostname).CombinedOutput(); err != nil {
++		log.Errorf("Failed to set hostname: %v: %s", err, out)
++		return
++	}
++	if out, err := exec.Command("systemctl", "try-restart", "--no-block", "avahi-daemon").CombinedOutput(); err != nil {
++		log.Errorf("Failed to restart avahi-daemon: %v: %s", err, out)
++	}
++}
++
+ var Fs = afero.NewOsFs()

@@ -1,0 +1,133 @@
+diff --git a/config.go b/config.go
+index fc3f973..50435f4 100644
+--- a/config.go
++++ b/config.go
+@@ -46,6 +46,8 @@ type Config struct {
+ 	fileLock  *flock.Flock
+ 	AutoWrite bool
+ 	mu        sync.Mutex
++	// unwritten is set when there are changes that haven't been written yet.
++	unwritten bool
+ }
+ 
+ const (
+@@ -290,7 +292,14 @@ func (c *Config) Update() error {
+ 	// Run actual target function
+ 	return c.update()
+ }
++
++// update reads the config file again, for changes made by other processes, unless
++// there are changes that haven't been written yet. Unsetting moves the changes set
++// before into the settings read from the file, so reading it again would lose them.
+ func (c *Config) update() error {
++	if c.unwritten {
++		return nil
++	}
+ 	return c.readInConfig()
+ }
+ 
+@@ -304,6 +313,7 @@ func (c *Config) Reload() error {
+ 	c.v = viper.New()
+ 	c.v.SetFs(fs)
+ 	c.v.SetConfigFile(configFile)
++	c.unwritten = false
+ 	return c.readInConfig()
+ }
+ 
+@@ -357,6 +367,7 @@ func (c *Config) unset(key string) error {
+ 		return err
+ 	}
+ 	c.v.Set(path[0]+".updated", now())
++	c.unwritten = true
+ 	return nil
+ }
+ 
+@@ -427,7 +438,11 @@ func (c *Config) write() error {
+ 		return err
+ 	}
+ 	defer c.fileLock.Unlock()
+-	return c.v.WriteConfig()
++	if err := c.v.WriteConfig(); err != nil {
++		return err
++	}
++	c.unwritten = false
++	return nil
+ }
+ 
+ func notSectionKeyError(key string) error {
+@@ -456,6 +471,7 @@ func (c *Config) validateAndSet(key string, value interface{}) error {
+ 
+ 	c.v.Set(key, value)
+ 	c.v.Set(section+".updated", now())
++	c.unwritten = true
+ 	return nil
+ }
+ 
+diff --git a/config_test.go b/config_test.go
+index 2444b5e..482fa40 100644
+--- a/config_test.go
++++ b/config_test.go
+@@ -696,3 +696,63 @@ func randString(n int) string {
+ 	}
+ 	return string(b)
+ }
++
++// newFsWithConfig is newFs with a config file with the given content.
++func newFsWithConfig(t *testing.T, content string) {
++	writeEvents = false
++	fs := afero.NewMemMapFs()
++	SetFs(fs)
++	lockFileFunc, cleanupFunc := configtest.WriteConfigFromBytes(t, []byte(content), path.Join(DefaultConfigDir, ConfigFileName), fs)
++	SetLockFilePath(lockFileFunc)
++	t.Cleanup(cleanupFunc)
++}
++
++const sectionsToChange = `
++[thermal-recorder]
++use-low-power-mode = false
++[audio-recording]
++audio-mode = "Disabled"
++[windows]
++start-recording = "09:00"
++stop-recording = "17:00"
++`
++
++func checkChangedSections(t *testing.T) {
++	conf, err := New(DefaultConfigDir)
++	require.NoError(t, err)
++	var thermal ThermalRecorder
++	require.NoError(t, conf.Unmarshal(ThermalRecorderKey, &thermal))
++	assert.True(t, thermal.UseLowPowerMode)
++	var audio AudioRecording
++	require.NoError(t, conf.Unmarshal(AudioRecordingKey, &audio))
++	assert.Equal(t, "AudioOnly", audio.AudioMode)
++	var windows Windows
++	require.NoError(t, conf.Unmarshal(WindowsKey, &windows))
++	assert.Equal(t, "22:00", windows.StartRecording)
++}
++
++func TestSetSectionsThenWrite(t *testing.T) {
++	// Setting sections one after another and writing them at once, as
++	// cacophony-config-sync does, had been losing the first ones set.
++	newFsWithConfig(t, sectionsToChange)
++	conf, err := New(DefaultConfigDir)
++	require.NoError(t, err)
++	conf.AutoWrite = false
++	require.NoError(t, conf.SetFromMap(ThermalRecorderKey, map[string]any{"use-low-power-mode": true}, false))
++	require.NoError(t, conf.SetFromMap(AudioRecordingKey, map[string]any{"audio-mode": "AudioOnly"}, false))
++	require.NoError(t, conf.SetFromMap(WindowsKey, map[string]any{"start-recording": "22:00", "stop-recording": "06:00"}, false))
++	require.NoError(t, conf.Write())
++	checkChangedSections(t)
++}
++
++func TestSetMultipleSections(t *testing.T) {
++	newFsWithConfig(t, sectionsToChange)
++	conf, err := New(DefaultConfigDir)
++	require.NoError(t, err)
++	require.NoError(t, conf.SetMultipleSections(map[string]any{
++		ThermalRecorderKey: map[string]any{"use-low-power-mode": true},
++		AudioRecordingKey:  map[string]any{"audio-mode": "AudioOnly"},
++		WindowsKey:         map[string]any{"start-recording": "22:00", "stop-recording": "06:00"},
++	}))
++	checkChangedSections(t)
++}

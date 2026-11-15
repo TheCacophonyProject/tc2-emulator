@@ -45,7 +45,7 @@ pub fn wait_for<T>(
                 None => bail!("timed out after {timeout:?} waiting for {what}"),
             }
         }
-        std::thread::sleep(Duration::from_secs(2));
+        std::thread::sleep(Duration::from_millis(500));
     }
 }
 
@@ -262,9 +262,11 @@ impl LoggedInEntity for ProjectAdmin<'_> {
     }
 }
 
-/// The emulated device's managementd HTTP API, as used by Sidekick and the web UI.
+/// The emulated device's managementd HTTP API, as its web UI uses it, or as Sidekick
+/// does with [`Managementd::as_sidekick`].
 pub struct Managementd {
     client: Client,
+    sidekick: bool,
 }
 
 /// managementd's /api/device-info.
@@ -289,14 +291,23 @@ pub const TEST_RECORDING_READY: i32 = 1;
 
 impl Managementd {
     pub fn new() -> Self {
-        Managementd { client: client() }
+        Managementd { client: client(), sidekick: false }
+    }
+
+    /// managementd as Sidekick uses it. managementd tells its web UI apart by a
+    /// header, and changes the power mode Sidekick sets and sees for the medium
+    /// power mode, which Sidekick doesn't know about.
+    pub fn as_sidekick(&self) -> Managementd {
+        Managementd { client: self.client.clone(), sidekick: true }
     }
 
     fn request(&self, method: reqwest::Method, path: &str) -> RequestBuilder {
-        self.client
+        let request = self
+            .client
             .request(method, format!("{}/api{path}", managementd_url()))
             // Fixed credentials in managementd.
-            .basic_auth("admin", Some("feathers"))
+            .basic_auth("admin", Some("feathers"));
+        if self.sidekick { request } else { request.header("X-Client", "management-interface") }
     }
 
     fn send(&self, request: RequestBuilder) -> anyhow::Result<Response> {
@@ -338,7 +349,8 @@ impl Managementd {
     }
 
     /// Writes keys of one config section (e.g. `thermal-recorder`, with mapstructure
-    /// keys like `use-low-power-mode`), as Sidekick does. The device stamps `updated`.
+    /// keys like `use-low-power-mode`), as the web UI's config page and Sidekick do.
+    /// The device stamps `updated`.
     pub fn set_config(&self, section: &str, config: Value) -> anyhow::Result<()> {
         self.send(
             self.request(reqwest::Method::POST, "/config")
@@ -373,7 +385,7 @@ impl Managementd {
     }
 
     /// Rewrites the device's location as it is, so the config file changes and
-    /// cacophony-config-sync runs (after 10s), as it would after Sidekick edits.
+    /// cacophony-config-sync runs (after its delay), as it would after Sidekick edits.
     /// Nothing else prompts a sync of portal changes: it otherwise runs at start,
     /// when the modem connects, and daily.
     pub fn trigger_config_sync(&self) -> anyhow::Result<()> {
@@ -420,8 +432,12 @@ impl TestDevice {
         })?;
         let project = test_name("project");
         let project_id = user.create_project(&project)?.project_id;
+        let old_device_id = managementd.device_info()?.device_id;
         managementd.reregister_authorized(&user, &project, &test_name("device"))?;
-        let device_id = managementd.device_info()?.device_id;
+        // managementd can report the old device for a moment after reregistering.
+        let device_id = wait_for("device to reregister", Duration::from_secs(30), || {
+            Ok(Some(managementd.device_info()?.device_id).filter(|id| *id != old_device_id))
+        })?;
         Ok(TestDevice { managementd, user, project, project_id, device_id })
     }
 

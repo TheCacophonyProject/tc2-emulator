@@ -18,8 +18,10 @@ use std::thread::sleep;
 use std::time::Duration;
 use tc2_emu_e2e::{LoggedInEntity, TestDevice, now_iso, wait_for};
 
-/// The sync waits 10s after the config file changes, and the emulated device is slow.
-const SYNC_TIMEOUT: Duration = Duration::from_secs(180);
+/// A sync takes under 2s on the emulated device, and a change can take two. The
+/// sync waits after the config file changes first, only briefly under `make e2e`
+/// (TC2_CONFIG_SYNC_DELAY), but 10s otherwise.
+const SYNC_TIMEOUT: Duration = Duration::from_secs(20);
 
 struct Case {
     low_power: bool,
@@ -336,7 +338,8 @@ fn window(start: &str, stop: &str) -> (String, String) {
     (start.into(), stop.into())
 }
 
-/// Lets the device's clock pass a whole second, as it keeps times to the second.
+/// Leaves time between a change on one side and the other, so that which is newer
+/// doesn't depend on how closely the device's clock and the test's agree.
 fn next_second() {
     sleep(Duration::from_secs(2));
 }
@@ -384,19 +387,25 @@ fn newer_device_change_wins() -> anyhow::Result<()> {
     wait_for_device("the device's window on the API", &want, || {
         Ok(api_window(&device.settings()?))
     })?;
-    // Another sync, which mustn't bring the portal's older window back.
+    // Another sync, which mustn't bring the portal's older window back. A change to
+    // another section on the portal shows when it has run: the sync takes it after
+    // deciding about the window.
+    let seed = rand::random::<u32>();
+    device.user.update_device_settings(
+        device.device_id,
+        json!({ "audioRecording": { "audioMode": "AudioOnly", "audioSeed": seed, "updated": now_iso() } }),
+    )?;
     device.managementd.trigger_config_sync()?;
-    sleep(Duration::from_secs(30));
+    wait_for_device("the next sync to run", &seed, || Ok(device_case(&device)?.2))?;
     assert_eq!(device_window(&device)?, want);
     assert_eq!(api_window(&device.settings()?), want);
     Ok(())
 }
 
 /// Trap settings: enabled, the default state, then the species to trap and to
-/// protect, each a map of species to the confidence needed. "safe" arms the trap
-/// only while the camera classifies a species to trap and none to protect;
-/// "armed" triggers on motion alone, so the species have no effect, but they are
-/// kept for going back to "safe".
+/// protect, each a map of species to the confidence needed. "armed" triggers on
+/// any motion unless a species to protect was seen recently; "safe" triggers only
+/// while a species to trap was seen recently, and none to protect.
 type Trap = (bool, String, Value, Value);
 
 fn trap(enabled: bool, default_state: &str, target: Value, protect: Value) -> Trap {
@@ -447,7 +456,7 @@ fn portal_trap((enabled, default_state, target, protect): &Trap) -> Value {
     })
 }
 
-/// Enabled and armed with species kept, then waiting for the AI, with a species
+/// Enabled with species to trap and protect, armed then safe, with a species
 /// removed, then disabled.
 fn trap_cases() -> [Trap; 4] {
     [
@@ -538,5 +547,52 @@ fn invalid_portal_trap_settings_are_ignored() -> anyhow::Result<()> {
             == Some(true))
     })?;
     assert_eq!(device_trap(&device)?, before);
+    Ok(())
+}
+
+#[test]
+#[ignore = "needs a running emulator and API; run with `make e2e`"]
+fn legacy_sidekick_trap_settings() -> anyhow::Result<()> {
+    let device = set_up()?;
+    // Whatever earlier tests left it as, on the same device.
+    let (enabled, ..) = device_trap(&device)?;
+
+    // Sidekick's AI control page, which still sets the trap settings in comms. With
+    // comms disabled, as the emulator has no trap for tc2-hat-comms to talk to.
+    device.managementd.as_sidekick().set_config(
+        "comms",
+        json!({
+            "enable": false,
+            "comms-out": "uart",
+            "trap-enabled-by-default": false,
+            "trap-species": { "possum": 80 },
+            "trap-duration": "2m0s",
+            "protect-species": null,
+            "protect-duration": "5m0s",
+        }),
+    )?;
+
+    // They're moved to the trap section, which is enabled or not as before, as that's
+    // left to the portal.
+    let want = trap(enabled, "safe", json!({ "possum": 80 }), json!({}));
+    assert_eq!(device_trap(&device)?, want);
+    let config = device.managementd.as_sidekick().config()?;
+    assert_eq!(config["trap"]["TrapDuration"], json!(120_000_000_000u64));
+    assert_eq!(config["trap"]["ProtectDuration"], json!(300_000_000_000u64));
+
+    // Sidekick reads them back from comms, with durations in nanoseconds.
+    let comms = &config["comms"];
+    assert_eq!(comms["Enable"], json!(false));
+    assert_eq!(comms["CommsOut"], json!("uart"));
+    assert_eq!(comms["TrapEnabledByDefault"], json!(false));
+    assert_eq!(comms["TrapSpecies"], json!({ "possum": 80 }));
+    assert_eq!(comms["TrapDuration"], json!(120_000_000_000u64));
+    assert_eq!(species(&comms["ProtectSpecies"]), json!({}));
+    assert_eq!(comms["ProtectDuration"], json!(300_000_000_000u64));
+
+    // And they reach the portal like any change on the device.
+    wait_for_device("Sidekick's trap settings to reach the API", &want, || {
+        Ok(api_trap(&device.settings()?))
+    })?;
     Ok(())
 }

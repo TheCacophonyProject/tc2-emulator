@@ -32,7 +32,7 @@ const CAMERA_STARTUP_HANDSHAKE: u8 = 0x9;
 
 /// EXPECTED_RP2040_FIRMWARE_VERSION in the pinned tc2-agent release (see
 /// guest/versions/packages.txt); otherwise tc2-agent tries to reprogram the RP2040.
-const FIRMWARE_VERSION: u32 = 40;
+const FIRMWARE_VERSION: u32 = 41;
 const LEPTON_SERIAL: u32 = 123_456;
 /// tc2-agent reads this many bytes for every transfer, then the rest of a frame.
 const FIRST_READ: usize = 2066;

@@ -14,6 +14,7 @@ services:
       TC2_NAME: ${TC2_NAME:-}
       TC2_AGENT: ${TC2_AGENT:-}
       TC2_PERSIST: ${TC2_PERSIST:-0}
+      TC2_CONFIG_SYNC_DELAY: ${TC2_CONFIG_SYNC_DELAY:-}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:

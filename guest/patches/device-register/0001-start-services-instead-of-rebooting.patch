@@ -1,0 +1,225 @@
+diff --git a/_release/device-register.service b/_release/device-register.service
+index 83c7ae4..8b98b56 100644
+--- a/_release/device-register.service
++++ b/_release/device-register.service
+@@ -4,7 +4,7 @@ After=multi-user.target network.target
+ ConditionPathExists=!/etc/salt/minion_id
+ 
+ [Service]
+-ExecStart=/usr/bin/device-register --reboot --retry-until-registered
++ExecStart=/usr/bin/device-register --start-services --retry-until-registered
+ Type=oneshot
+ 
+ [Install]
+diff --git a/cmd/device-register/main.go b/cmd/device-register/main.go
+index da361e8..d2a74ff 100644
+--- a/cmd/device-register/main.go
++++ b/cmd/device-register/main.go
+@@ -17,17 +17,22 @@
+ package main
+ 
+ import (
++	"context"
++	"encoding/json"
++	"fmt"
+ 	"net/url"
+ 	"os"
+ 	"os/exec"
+ 	"strconv"
+ 	"strings"
++	"sync"
+ 	"time"
+ 
+ 	"github.com/TheCacophonyProject/event-reporter/v3/eventclient"
+ 	"github.com/TheCacophonyProject/go-api"
+ 	"github.com/TheCacophonyProject/go-config"
+ 	"github.com/TheCacophonyProject/go-utils/logging"
++	"github.com/TheCacophonyProject/go-utils/saltutil"
+ 	"github.com/TheCacophonyProject/modemd/connrequester"
+ 	arg "github.com/alexflint/go-arg"
+ 	petname "github.com/dustinkirkland/golang-petname"
+@@ -42,6 +47,7 @@ const (
+ 	minionIDFile            = "/etc/salt/minion_id"
+ 	defaultMinionIDPrefix   = "pi"
+ 	retryWait               = 5 * time.Second
++	grainsTimeout           = 2 * time.Minute
+ )
+ 
+ var version = "<not set>"
+@@ -49,6 +55,7 @@ var log = logging.NewLogger("info")
+ 
+ type Args struct {
+ 	Reboot               bool   `arg:"-r,--reboot" help:"reboot device after registering"`
++	StartServices        bool   `arg:"--start-services" help:"start the services that need a registered device after registering, rather than rebooting"`
+ 	API                  string `arg:"-a,--api" help:"url for the api server to register to"`
+ 	RemoveDeviceConfig   bool   `arg:"-d,--remove-device-config" help:"remove the device config files. This is useful if you need to register as a new device or to a different server."`
+ 	TestAPI              bool   `arg:"-t,--test-api" help:"use the test API. This will overwrite the API param"`
+@@ -150,6 +157,13 @@ func runMain() error {
+ 		}
+ 	}
+ 
++	if args.StartServices {
++		if err := startServices(); err != nil {
++			log.Printf("Failed to start services, rebooting instead: %v", err)
++			args.Reboot = true
++		}
++	}
++	grainsSet.Wait()
+ 	if args.Reboot {
+ 		log.Println("Restarting device.")
+ 		if err := exec.Command("reboot").Run(); err != nil {
+@@ -184,6 +198,36 @@ func register(args Args) error {
+ 			return err
+ 		}
+ 	}
++	// go-api sets them when it registers, but only once there's a minion ID, so
++	// for a new device it can't. salt-call takes a while, so the services that
++	// don't use salt start meanwhile (see startServices).
++	grainsSet.Add(1)
++	go func() {
++		defer grainsSet.Done()
++		if err := setGrains(apiClient.DeviceName(), apiClient.GroupName()); err != nil {
++			log.Printf("Failed to set salt grains: %v", err)
++		}
++	}()
++	return nil
++}
++
++// grainsSet is done once the salt grains are set after registering.
++var grainsSet sync.WaitGroup
++
++// setGrains sets the device name and group grains, locally, as there may be no
++// connection to the salt master yet.
++func setGrains(name, group string) error {
++	grains, err := json.Marshal(saltutil.Grains{DeviceName: name, Group: group})
++	if err != nil {
++		return err
++	}
++	log.Printf("Setting salt grains to %s", grains)
++	ctx, cancel := context.WithTimeout(context.Background(), grainsTimeout)
++	defer cancel()
++	out, err := exec.CommandContext(ctx, "salt-call", "--local", "grains.setvals", string(grains)).CombinedOutput()
++	if err != nil {
++		return fmt.Errorf("%w: %s", err, out)
++	}
+ 	return nil
+ }
+ 
+diff --git a/cmd/device-register/services.go b/cmd/device-register/services.go
+new file mode 100644
+index 0000000..1ace2cc
+--- /dev/null
++++ b/cmd/device-register/services.go
+@@ -0,0 +1,112 @@
++// device-register - helper for registering and renaming cacophony devices
++//  Copyright (C) 2026, The Cacophony Project
++//
++// This program is free software: you can redistribute it and/or modify
++// it under the terms of the GNU General Public License as published by
++// the Free Software Foundation, either version 3 of the License, or
++// (at your option) any later version.
++//
++// This program is distributed in the hope that it will be useful,
++// but WITHOUT ANY WARRANTY; without even the implied warranty of
++// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++// GNU General Public License for more details.
++//
++// You should have received a copy of the GNU General Public License
++// along with this program. If not, see <http://www.gnu.org/licenses/>.
++
++package main
++
++import (
++	"fmt"
++	"os/exec"
++	"strings"
++)
++
++// startServices starts what a reboot would after registering, without one.
++// Services that need a registered device, such as managementd, salt-minion and
++// thermal-uploader, have ConditionPathExists=/etc/salt/minion_id, so systemd
++// skipped them at boot. Starting a unit checks its conditions again, so starting
++// every skipped one starts only those that now hold. Services waiting to restart
++// after failing because the device wasn't registered, such as
++// cacophony-config-sync, are restarted now rather than when their wait ends.
++// The salt services wait for the salt grains to be set, so that salt-minion first
++// connects to the salt master with them, and salt-helper doesn't set them too.
++func startServices() error {
++	out, err := exec.Command("systemctl", "show", "--property=Wants", "--value", "multi-user.target").Output()
++	if err != nil {
++		return fmt.Errorf("listing services: %w", err)
++	}
++	wanted := strings.Fields(string(out))
++	if len(wanted) == 0 {
++		return nil
++	}
++	showArgs := append([]string{"show", "--property=Id,LoadState,ActiveState,SubState,ConditionResult"}, wanted...)
++	out, err = exec.Command("systemctl", showArgs...).Output()
++	if err != nil {
++		return fmt.Errorf("reading service states: %w", err)
++	}
++	var start, restart, startSalt, restartSalt []string
++	for _, unit := range parseUnits(string(out)) {
++		id := unit["Id"]
++		salt := saltServices[id]
++		switch {
++		case unit["LoadState"] != "loaded":
++			// Can't be started: masked, as hostapd is on Raspberry Pi OS, or missing.
++		case unit["ActiveState"] == "inactive" && unit["ConditionResult"] == "no" && salt:
++			startSalt = append(startSalt, id)
++		case unit["ActiveState"] == "inactive" && unit["ConditionResult"] == "no":
++			start = append(start, id)
++		case unit["SubState"] == "auto-restart" && salt:
++			restartSalt = append(restartSalt, id)
++		case unit["SubState"] == "auto-restart":
++			restart = append(restart, id)
++		}
++	}
++	if err := systemctl("start", "Starting services skipped at boot", start); err != nil {
++		return err
++	}
++	if err := systemctl("restart", "Restarting services waiting to restart", restart); err != nil {
++		return err
++	}
++	grainsSet.Wait()
++	if err := systemctl("start", "Starting salt services skipped at boot", startSalt); err != nil {
++		return err
++	}
++	return systemctl("restart", "Restarting salt services waiting to restart", restartSalt)
++}
++
++// saltServices use or set the salt grains.
++var saltServices = map[string]bool{
++	"salt-minion.service":  true,
++	"salt-updater.service": true,
++}
++
++// systemctl starts or restarts units without waiting for them.
++func systemctl(command, what string, units []string) error {
++	if len(units) == 0 {
++		return nil
++	}
++	log.Printf("%s: %s", what, strings.Join(units, " "))
++	if err := exec.Command("systemctl", append([]string{command, "--no-block"}, units...)...).Run(); err != nil {
++		return fmt.Errorf("%s: %w", strings.ToLower(what), err)
++	}
++	return nil
++}
++
++// parseUnits parses the output of `systemctl show` for several units: a block of
++// key=value lines for each, separated by blank lines.
++func parseUnits(out string) []map[string]string {
++	var units []map[string]string
++	for _, block := range strings.Split(out, "\n\n") {
++		unit := map[string]string{}
++		for _, line := range strings.Split(block, "\n") {
++			if key, value, ok := strings.Cut(line, "="); ok {
++				unit[key] = value
++			}
++		}
++		if unit["Id"] != "" {
++			units = append(units, unit)
++		}
++	}
++	return units
++}

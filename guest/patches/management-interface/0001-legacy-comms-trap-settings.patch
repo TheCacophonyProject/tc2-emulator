@@ -1,0 +1,230 @@
+diff --git a/api/api.go b/api/api.go
+index 31a18eb..892e27b 100644
+--- a/api/api.go
++++ b/api/api.go
+@@ -693,6 +693,9 @@ func (api *ManagementAPI) SetConfig(w http.ResponseWriter, r *http.Request) {
+ 		ensureLowPowerForInstantClassify(newConfig)
+ 		api.ensurePowerModeForComms(newConfig)
+ 	}
++	// After the above, which look at whether the comms section was given.
++	moveLegacyTrapSettings(newConfig)
++
+ 	log.Debugf("set config: %+v", newConfig)
+ 	if err := api.config.SetMultipleSections(newConfig); err != nil {
+ 		log.Printf("Error with SetFromMap: %s", err)
+@@ -711,8 +714,10 @@ func (api *ManagementAPI) GetConfig(w http.ResponseWriter, r *http.Request) {
+ 		return
+ 	}
+ 
++	defaults := goconfig.GetDefaults()
++	defaults[goconfig.CommsKey] = newLegacyComms(goconfig.DefaultComms(), goconfig.DefaultTrap())
+ 	defaultValues := map[string]interface{}{}
+-	for k, v := range goconfig.GetDefaults() {
++	for k, v := range defaults {
+ 		defaultValues[toCamelCase(k)] = v
+ 	}
+ 
+@@ -725,6 +730,14 @@ func (api *ManagementAPI) GetConfig(w http.ResponseWriter, r *http.Request) {
+ 		// Once sidekick is updated we can remove this
+ 		reportSidekickPowerMode(values)
+ 	}
++	// After the above, which reads the comms section as it is in the config.
++	// The trap settings as they are used, with the defaults for what isn't set.
++	trap := goconfig.DefaultTrap()
++	if err := api.config.Unmarshal(goconfig.TrapKey, &trap); err != nil {
++		serverError(&w, err)
++		return
++	}
++	values[goconfig.CommsKey] = newLegacyComms(*values[goconfig.CommsKey].(*goconfig.Comms), trap)
+ 
+ 	configValuesCC := map[string]interface{}{}
+ 	for k, v := range values {
+diff --git a/api/legacytrap.go b/api/legacytrap.go
+new file mode 100644
+index 0000000..48f4db4
+--- /dev/null
++++ b/api/legacytrap.go
+@@ -0,0 +1,93 @@
++package api
++
++import (
++	"time"
++
++	goconfig "github.com/TheCacophonyProject/go-config"
++)
++
++// The trap settings used to be in the comms section, and older versions of Sidekick
++// still set and read them there. These map them to and from the trap section. Whether
++// the trap is enabled is left to the trap section, as set on the web portal.
++
++// legacyCommsTrapKeys are the trap settings that were in the comms section, with
++// their keys in the trap section. trap-enabled-by-default is now the default state.
++var legacyCommsTrapKeys = map[string]string{
++	"trap-species":     "target-species",
++	"protect-species":  "protect-species",
++	"trap-duration":    "trap-duration",
++	"protect-duration": "protect-duration",
++}
++
++// moveLegacyTrapSettings moves trap settings set in the comms section of newConfig,
++// keyed by section, to the trap section. Settings also given in the trap section win.
++func moveLegacyTrapSettings(newConfig map[string]any) {
++	comms, ok := newConfig[goconfig.CommsKey].(map[string]any)
++	if !ok {
++		return
++	}
++	trap := map[string]any{}
++	for commsKey, trapKey := range legacyCommsTrapKeys {
++		value, ok := comms[commsKey]
++		if !ok {
++			continue
++		}
++		delete(comms, commsKey)
++		if value == nil {
++			if trapKey != "target-species" && trapKey != "protect-species" {
++				continue
++			}
++			// Sidekick sends no species as null.
++			value = map[string]any{}
++		}
++		trap[trapKey] = value
++	}
++	if value, ok := comms["trap-enabled-by-default"]; ok {
++		delete(comms, "trap-enabled-by-default")
++		if enabled, ok := value.(bool); ok {
++			trap["default-state"] = goconfig.TrapSafe
++			if enabled {
++				trap["default-state"] = goconfig.TrapArmed
++			}
++		} else {
++			log.Errorf("Ignoring comms trap-enabled-by-default, expected a boolean, got %v", value)
++		}
++	}
++	if len(trap) == 0 {
++		return
++	}
++	if len(comms) == 0 {
++		delete(newConfig, goconfig.CommsKey)
++	}
++	if given, ok := newConfig[goconfig.TrapKey].(map[string]any); ok {
++		for key, value := range trap {
++			if _, ok := given[key]; !ok {
++				given[key] = value
++			}
++		}
++	} else {
++		newConfig[goconfig.TrapKey] = trap
++	}
++}
++
++// legacyComms is the comms section with the trap settings that older versions of
++// Sidekick read from it.
++type legacyComms struct {
++	goconfig.Comms
++	TrapEnabledByDefault bool
++	TrapSpecies          map[string]int32
++	TrapDuration         time.Duration
++	ProtectSpecies       map[string]int32
++	ProtectDuration      time.Duration
++}
++
++func newLegacyComms(comms goconfig.Comms, trap goconfig.Trap) legacyComms {
++	return legacyComms{
++		Comms:                comms,
++		TrapEnabledByDefault: trap.EnabledByDefault(),
++		TrapSpecies:          trap.TargetSpecies,
++		TrapDuration:         trap.TrapDuration,
++		ProtectSpecies:       trap.ProtectSpecies,
++		ProtectDuration:      trap.ProtectDuration,
++	}
++}
+diff --git a/api/legacytrap_test.go b/api/legacytrap_test.go
+new file mode 100644
+index 0000000..ee8ff36
+--- /dev/null
++++ b/api/legacytrap_test.go
+@@ -0,0 +1,84 @@
++package api
++
++import (
++	"encoding/json"
++	"reflect"
++	"testing"
++	"time"
++
++	goconfig "github.com/TheCacophonyProject/go-config"
++)
++
++func TestMoveLegacyTrapSettings(t *testing.T) {
++	for _, test := range []struct {
++		name      string
++		newConfig string
++		want      string
++	}{
++		{
++			name: "as Sidekick sets them",
++			newConfig: `{"comms": {"enable": true, "comms-out": "uart", "trap-enabled-by-default": false,
++				"trap-species": {"possum": 80}, "trap-duration": "2m0s",
++				"protect-species": null, "protect-duration": "5m0s"}}`,
++			want: `{"comms": {"enable": true, "comms-out": "uart"},
++				"trap": {"default-state": "safe", "target-species": {"possum": 80}, "trap-duration": "2m0s",
++				"protect-species": {}, "protect-duration": "5m0s"}}`,
++		},
++		{
++			name:      "only trap settings",
++			newConfig: `{"comms": {"trap-enabled-by-default": true}}`,
++			want:      `{"trap": {"default-state": "armed"}}`,
++		},
++		{
++			name:      "the trap section wins",
++			newConfig: `{"comms": {"trap-duration": "2m"}, "trap": {"trap-duration": "3m", "enabled": true}}`,
++			want:      `{"trap": {"trap-duration": "3m", "enabled": true}}`,
++		},
++		{
++			name:      "no trap settings",
++			newConfig: `{"comms": {"enable": false}, "windows": {"start-recording": "-30m"}}`,
++			want:      `{"comms": {"enable": false}, "windows": {"start-recording": "-30m"}}`,
++		},
++	} {
++		t.Run(test.name, func(t *testing.T) {
++			var newConfig, want map[string]any
++			if err := json.Unmarshal([]byte(test.newConfig), &newConfig); err != nil {
++				t.Fatal(err)
++			}
++			if err := json.Unmarshal([]byte(test.want), &want); err != nil {
++				t.Fatal(err)
++			}
++			moveLegacyTrapSettings(newConfig)
++			if !reflect.DeepEqual(newConfig, want) {
++				t.Errorf("got %v, want %v", newConfig, want)
++			}
++		})
++	}
++}
++
++func TestLegacyComms(t *testing.T) {
++	trap := goconfig.DefaultTrap()
++	trap.DefaultState = goconfig.TrapSafe
++	trap.TargetSpecies = map[string]int32{"possum": 80}
++	trap.TrapDuration = 2 * time.Minute
++	b, err := json.Marshal(newLegacyComms(goconfig.Comms{Enable: true, CommsOut: "uart"}, trap))
++	if err != nil {
++		t.Fatal(err)
++	}
++	var got map[string]any
++	if err := json.Unmarshal(b, &got); err != nil {
++		t.Fatal(err)
++	}
++	// As Sidekick reads them: durations in nanoseconds, species as maps.
++	want := map[string]any{
++		"Enable": true, "CommsOut": "uart", "Bluetooth": false, "PowerOutput": "", "PowerUpDuration": float64(0),
++		"TrapEnabledByDefault": false,
++		"TrapSpecies":          map[string]any{"possum": float64(80)},
++		"TrapDuration":         float64(2 * time.Minute),
++		"ProtectSpecies":       nil,
++		"ProtectDuration":      float64(time.Minute),
++	}
++	if !reflect.DeepEqual(got, want) {
++		t.Errorf("got %v, want %v", got, want)
++	}
++}

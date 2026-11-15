@@ -8,6 +8,9 @@
 #                  the tc2-emu-agent stand-in
 #   TC2_PERSIST=1  keep guest disk changes between runs (default: fresh each run)
 #   TC2_SMP        guest CPU count (default 4, as on a Pi Zero 2 W)
+#   TC2_CONFIG_SYNC_DELAY  how long cacophony-config-sync waits after the config
+#                  file changes before syncing, e.g. 100ms (default 10s, as on a
+#                  real device)
 set -euo pipefail
 
 IMAGES=${TC2_IMAGES:-/images}
@@ -29,6 +32,7 @@ APPEND="root=PARTUUID=93147b3c-02 rootfstype=ext4 rootwait fsck.repair=yes conso
 [[ -n ${TC2_GROUP:-} ]] && APPEND+=" tc2-emu.group=$TC2_GROUP"
 [[ -n ${TC2_NAME:-} ]] && APPEND+=" tc2-emu.name=$TC2_NAME"
 [[ ${TC2_AGENT:-} == real ]] && APPEND+=" tc2-emu.agent=real"
+[[ -n ${TC2_CONFIG_SYNC_DELAY:-} ]] && APPEND+=" tc2-emu.config-sync-delay=$TC2_CONFIG_SYNC_DELAY"
 
 # The image configures eth0 statically as 192.168.1.2/24 with no gateway, so the
 # user-mode network uses that subnet. QEMU presents forwarded connections with

@@ -10,9 +10,9 @@ use serde::{Deserialize, Serialize};
 
 pub const ADDRESS: u8 = 0x25;
 
-/// Firmware version tc2-hat-controller 0.34.3 expects; any other version makes
+/// Firmware version tc2-hat-controller 0.36.1 expects; any other version makes
 /// tc2-hat-attiny try to reflash the ATtiny over UPDI.
-pub const FIRMWARE_VERSION: (u8, u8, u8) = (1, 0, 10);
+pub const FIRMWARE_VERSION: (u8, u8, u8) = (1, 1, 0);
 
 const TYPE_VALUE: u8 = 0xCA;
 

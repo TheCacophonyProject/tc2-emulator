@@ -1,0 +1,107 @@
+diff --git a/internal/cacophony-config-sync/main.go b/internal/cacophony-config-sync/main.go
+index b235926..9581c5a 100644
+--- a/internal/cacophony-config-sync/main.go
++++ b/internal/cacophony-config-sync/main.go
+@@ -18,6 +18,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ package cacophonyconfigsync
+ 
+ import (
++	"bytes"
++	"encoding/json"
+ 	"errors"
+ 	"fmt"
+ 	"math"
+@@ -556,6 +558,16 @@ func (s *SyncService) filterUnchangedSettings(mappedSettings, deviceSettings map
+ 				continue
+ 			}
+ 
++			// Taking the same settings again would only write the config again,
++			// restarting the services that use it. This happens as times are kept
++			// to different precisions: the config keeps them to the second, though
++			// the device can upload them to the nanosecond, and the web portal to
++			// the millisecond, so the API's can look newer.
++			if sameSettings(section, mappedSection, deviceSection) {
++				log.Printf("Filtering out section %s: the device has the same settings", section.Key)
++				continue
++			}
++
+ 			// Find the "updated" field for this section
+ 			var updatedField string
+ 			for _, mapping := range section.Mappings {
+@@ -597,6 +609,27 @@ func (s *SyncService) filterUnchangedSettings(mappedSettings, deviceSettings map
+ 	return filteredSettings
+ }
+ 
++// sameSettings reports whether the settings from the API, keyed by MapKey, are the
++// ones the device has, keyed by APIKey. Only the settings the API gives are compared,
++// as JSON, since they have different types on each side.
++func sameSettings(section Section, apiSettings, deviceSettings map[string]any) bool {
++	for _, mapping := range section.Mappings {
++		if mapping.APIKey == "updated" {
++			continue
++		}
++		apiValue, ok := apiSettings[mapping.MapKey]
++		if !ok {
++			continue
++		}
++		apiJSON, apiErr := json.Marshal(apiValue)
++		deviceJSON, deviceErr := json.Marshal(deviceSettings[mapping.APIKey])
++		if apiErr != nil || deviceErr != nil || !bytes.Equal(apiJSON, deviceJSON) {
++			return false
++		}
++	}
++	return true
++}
++
+ func (s *SyncService) readCurrentSettings() (map[string]any, error) {
+ 	if err := s.config.Reload(); err != nil {
+ 		return nil, err
+diff --git a/internal/cacophony-config-sync/main_test.go b/internal/cacophony-config-sync/main_test.go
+index 97bee88..f4d0cd9 100644
+--- a/internal/cacophony-config-sync/main_test.go
++++ b/internal/cacophony-config-sync/main_test.go
+@@ -726,3 +726,44 @@ func TestSyncDelayArg(t *testing.T) {
+ 	require.NoError(t, err)
+ 	assert.Equal(t, 100*time.Millisecond, args.SyncDelay)
+ }
++
++func TestSyncDoesNotTakeTheSameSettings(t *testing.T) {
++	// As after the device took the window from the API in the second the portal set
++	// it: the config keeps times to the second, so the API's looks newer.
++	s, api := newSyncService(t, `
++[windows]
++start-recording = "22:00"
++stop-recording = "06:00"
++updated = 2025-06-01T00:00:00Z
++`, map[string]any{
++		"windows": map[string]any{"startRecording": "22:00", "stopRecording": "06:00", "updated": "2025-06-01T00:00:00.500Z"},
++	})
++	configFile := path.Join(configDir, config.ConfigFileName)
++	before, err := afero.ReadFile(syncFs, configFile)
++	require.NoError(t, err)
++	require.NoError(t, s.sync())
++	after, err := afero.ReadFile(syncFs, configFile)
++	require.NoError(t, err)
++	assert.Equal(t, string(before), string(after), "the config isn't written again")
++
++	// A change on the portal in the same second is still taken.
++	api.settings["windows"] = map[string]any{"startRecording": "21:00", "stopRecording": "06:00", "updated": "2025-06-01T00:00:00.900Z"}
++	require.NoError(t, s.sync())
++	assert.Equal(t, "21:00", unmarshalSection[config.Windows](t, s, config.WindowsKey).StartRecording)
++}
++
++func TestSameSettings(t *testing.T) {
++	trap := ConfigSections[len(ConfigSections)-1]
++	require.Equal(t, "trap", trap.Name)
++	device := map[string]any{
++		"enabled": true, "defaultState": "safe",
++		"target": map[string]int32{"possum": 80}, "protect": map[string]int32{},
++	}
++	// From the API, as JSON.
++	same := map[string]any{"enabled": true, "default-state": "safe", "target-species": map[string]any{"possum": 80.0}, "protect-species": map[string]any{}}
++	assert.True(t, sameSettings(trap, same, device))
++	// Only what the API gives is compared.
++	assert.True(t, sameSettings(trap, map[string]any{"enabled": true}, device))
++	assert.False(t, sameSettings(trap, map[string]any{"target-species": map[string]any{"possum": 70.0}}, device))
++	assert.False(t, sameSettings(trap, map[string]any{"enabled": false}, device))
++}

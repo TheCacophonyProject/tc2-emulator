@@ -1,0 +1,8 @@
+#!/bin/sh
+# Runs in place of cacophony-config-sync: the build with guest/patches applied. With
+# tc2-emu.config-sync-delay=<duration> on the kernel command line
+# (TC2_CONFIG_SYNC_DELAY), it waits that long after the config file changes before
+# syncing, rather than 10s, so that tests needn't wait.
+dir=$(dirname "$0")
+delay=$(tr ' ' '\n' < /proc/cmdline | sed -n 's/^tc2-emu\.config-sync-delay=//p')
+exec "$dir/cacophony-config-utils" sync ${delay:+--sync-delay "$delay"} "$@"

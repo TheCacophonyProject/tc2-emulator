@@ -2,11 +2,12 @@
 # Pins guest/versions/packages.txt to the TC2 software versions salt deploys on
 # a channel, from salt-version-info. The image is updated to these before the
 # emulator's patches are applied (see guest-setup.sh and the build-*.sh scripts).
-# The channel is the salt `environment` grain without its `tc2-` prefix; the
-# image's is tc2-prod.
+# The channel is the salt `environment` grain without its `tc2-` prefix. The
+# emulator follows test, to try releases before they reach prod devices; the
+# image's own grain is still tc2-prod, but there's no salt master to act on it.
 set -euo pipefail
 
-CHANNEL=${1:-prod}
+CHANNEL=${1:-test}
 URL=https://raw.githubusercontent.com/TheCacophonyProject/salt-version-info/main/salt-version-info.json
 OUT=$(dirname "$0")/../guest/versions/packages.txt
 

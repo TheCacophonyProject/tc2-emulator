@@ -1,114 +1,241 @@
-diff --git a/internal/tc2-hat-comms/config.go b/internal/tc2-hat-comms/config.go
-index 7cc26ba..5aaad1b 100644
---- a/internal/tc2-hat-comms/config.go
-+++ b/internal/tc2-hat-comms/config.go
-@@ -47,12 +47,40 @@ func ParseCommsConfig(configDir string) (*CommsConfig, error) {
- 		return nil, err
+diff --git a/internal/tc2-hat-comms/at-esl.go b/internal/tc2-hat-comms/at-esl.go
+index d624d6b..369f6ed 100644
+--- a/internal/tc2-hat-comms/at-esl.go
++++ b/internal/tc2-hat-comms/at-esl.go
+@@ -36,6 +36,9 @@ var (
+ type ATESLMessenger struct {
+ 	BaudRate    int
+ 	TrapSpecies map[string]int32
++	// TrapEnabled is from the trap settings. Classifications are only sent when it's set,
++	// apart from test classifications.
++	TrapEnabled bool
+ }
+ 
+ type ATESLLastPrediction struct {
+@@ -71,7 +74,8 @@ func processATESL(config *CommsConfig, testClassification *TestClassification, e
+ 
+ 	messenger := ATESLMessenger{
+ 		config.BaudRate,
+-		config.TrapSpecies,
++		config.TrapConfig.TargetSpecies,
++		config.TrapConfig.Enabled,
  	}
  
--	return &CommsConfig{
-+	commsConfig := &CommsConfig{
- 		Comms:          c,
- 		TrapSpecies:    tracks.Species(c.TrapSpecies),
- 		ProtectSpecies: tracks.Species(c.ProtectSpecies),
- 		UartTxPin:      gpio.UartTx,
- 		TrapConfig:     trap,
- 		LowPowerMode:   recorder.UseLowPowerMode,
--	}, nil
-+	}
-+	applyTrapSettings(commsConfig)
-+	return commsConfig, nil
-+}
-+
-+// applyTrapSettings controls the trap with the trap settings, as set on the web portal,
-+// when they enable it. The trap then has the UART, whatever output the comms settings are
-+// for, as only one output can use it. Otherwise the comms settings are used as they are.
-+func applyTrapSettings(c *CommsConfig) {
-+	trap := c.TrapConfig
-+	if !trap.Enabled {
-+		return
-+	}
-+	if c.Enable && c.CommsOut != "trap-control" && c.CommsOut != "uart" {
-+		log.Warnf("The trap is enabled, so it is controlled instead of the '%s' output in the comms settings", c.CommsOut)
-+	}
-+	c.Enable = true
-+	c.CommsOut = "trap-control"
-+	if trap.DefaultState == config.TrapSafe {
-+		// Enabled only while a species to trap has been seen, and not one to protect.
-+		c.TrapEnabledByDefault = false
-+		c.TrapSpecies = tracks.Species(trap.TargetSpecies)
-+		c.ProtectSpecies = tracks.Species(trap.ProtectSpecies)
-+	} else {
-+		// Armed: always enabled, triggering on motion alone, whatever is classified.
-+		c.TrapEnabledByDefault = true
-+		c.TrapSpecies = nil
-+		c.ProtectSpecies = nil
-+	}
+ 	if testClassification != nil {
+@@ -97,6 +101,10 @@ func processATESL(config *CommsConfig, testClassification *TestClassification, e
+ 		// Process the event, depending on the type
+ 		switch v := e.(type) {
+ 		case trackingEvent:
++			if !messenger.TrapEnabled {
++				log.Debug("Trap is disabled in the trap settings, not sending the classification")
++				break
++			}
+ 			err := messenger.processTrackingEvent(v, &atesLastPrediction)
+ 			if err != nil {
+ 				log.Error("Error sending classification:", err)
+diff --git a/internal/tc2-hat-comms/config.go b/internal/tc2-hat-comms/config.go
+index 7cc26ba..d17a618 100644
+--- a/internal/tc2-hat-comms/config.go
++++ b/internal/tc2-hat-comms/config.go
+@@ -2,18 +2,15 @@ package comms
+ 
+ import (
+ 	"github.com/TheCacophonyProject/go-config"
+-	"github.com/TheCacophonyProject/tc2-hat-controller/tracks"
+ )
+ 
+ type CommsConfig struct {
+ 	config.Comms
+ 
+-	TrapSpecies    tracks.Species
+-	ProtectSpecies tracks.Species
+-
+ 	UartTxPin string
+ 	BaudRate  int
+ 
++	// TrapConfig is how the output acts on classifications, whichever it is.
+ 	TrapConfig config.Trap
+ 
+ 	// LowPowerMode is set when the RP2040 does the recording rather than the Raspberry Pi.
+@@ -48,11 +45,9 @@ func ParseCommsConfig(configDir string) (*CommsConfig, error) {
+ 	}
+ 
+ 	return &CommsConfig{
+-		Comms:          c,
+-		TrapSpecies:    tracks.Species(c.TrapSpecies),
+-		ProtectSpecies: tracks.Species(c.ProtectSpecies),
+-		UartTxPin:      gpio.UartTx,
+-		TrapConfig:     trap,
+-		LowPowerMode:   recorder.UseLowPowerMode,
++		Comms:        c,
++		UartTxPin:    gpio.UartTx,
++		TrapConfig:   trap,
++		LowPowerMode: recorder.UseLowPowerMode,
+ 	}, nil
  }
-diff --git a/internal/tc2-hat-comms/config_test.go b/internal/tc2-hat-comms/config_test.go
-new file mode 100644
-index 0000000..6b7833c
---- /dev/null
-+++ b/internal/tc2-hat-comms/config_test.go
-@@ -0,0 +1,61 @@
-+package comms
-+
-+import (
-+	"testing"
-+	"time"
-+
-+	"github.com/TheCacophonyProject/go-config"
-+	"github.com/TheCacophonyProject/tc2-hat-controller/tracks"
-+	"github.com/stretchr/testify/assert"
-+)
-+
-+func TestApplyTrapSettings(t *testing.T) {
-+	// Comms set up on the camera, such as by Sidekick.
-+	atESL := func() *CommsConfig {
-+		return &CommsConfig{
-+			Comms: config.Comms{
-+				Enable:          true,
-+				CommsOut:        "at-esl",
+diff --git a/internal/tc2-hat-comms/main.go b/internal/tc2-hat-comms/main.go
+index c1585ea..45a0ef6 100644
+--- a/internal/tc2-hat-comms/main.go
++++ b/internal/tc2-hat-comms/main.go
+@@ -112,8 +112,11 @@ func Run(inputArgs []string, ver string) error {
+ 		}
+ 	}
+ 
+-	log.Info("Species to trap:\n", tracks.Species(config.TrapSpecies))
+-	log.Info("Species to protect:\n", tracks.Species(config.ProtectSpecies))
++	if !config.TrapConfig.Enabled {
++		log.Info("Trap is disabled in the trap settings, so classifications won't be acted on.")
++	}
++	log.Info("Species to trap:\n", tracks.Species(config.TrapConfig.TargetSpecies))
++	log.Info("Species to protect:\n", tracks.Species(config.TrapConfig.ProtectSpecies))
+ 
+ 	eventsChan := make(chan event, 10)
+ 
+diff --git a/internal/tc2-hat-comms/simple.go b/internal/tc2-hat-comms/simple.go
+index 0cf8398..3b340d1 100644
+--- a/internal/tc2-hat-comms/simple.go
++++ b/internal/tc2-hat-comms/simple.go
+@@ -50,14 +50,17 @@ func processSimpleOutput(config *CommsConfig, eventSignals chan event) error {
+ 
+ 	for {
+ 		now := time.Now()
+-		trapEnabled = config.TrapEnabledByDefault
++		trapEnabled = config.TrapConfig.EnabledByDefault()
+ 
+ 		// Check if species sighting influences trap state
+-		if lastProtectSpeciesSighting.Add(config.ProtectDuration).After(now) {
++		if lastProtectSpeciesSighting.Add(config.TrapConfig.ProtectDuration).After(now) {
+ 			trapEnabled = false // Disable trap if protective species has been sighted recently
+-		} else if lastTrapSpeciesSighting.Add(config.TrapDuration).After(now) {
++		} else if lastTrapSpeciesSighting.Add(config.TrapConfig.TrapDuration).After(now) {
+ 			trapEnabled = true // Enable trap if trap species has been sighted recently
+ 		}
++		if !config.TrapConfig.Enabled {
++			trapEnabled = false // The trap settings turn it off
++		}
+ 
+ 		// Check if the state has changed and if so, enable or disable the trap
+ 		if trapEnabled != previousTrapEnabled {
+@@ -92,7 +95,7 @@ func processSimpleOutput(config *CommsConfig, eventSignals chan event) error {
+ 
+ 		// Delay 10 seconds or until the trap should be disabled
+ 		var delay = 10 * time.Second
+-		trapDisableTime := lastTrapSpeciesSighting.Add(config.TrapDuration)
++		trapDisableTime := lastTrapSpeciesSighting.Add(config.TrapConfig.TrapDuration)
+ 		if trapEnabled && time.Until(trapDisableTime) < delay {
+ 			delay = time.Until(trapDisableTime)
+ 		}
+@@ -108,7 +111,7 @@ func processSimpleOutput(config *CommsConfig, eventSignals chan event) error {
+ 				log.Debugf("Received tracking event: %+v", v)
+ 				log.Debugf("Found new track: %+v", t)
+ 
+-				protect, animal, conf := v.Species.MatchSpeciesWithConfidence(config.ProtectSpecies)
++				protect, animal, conf := v.Species.MatchSpeciesWithConfidence(config.TrapConfig.ProtectSpecies)
+ 				if protect {
+ 					disablingReason = fmt.Sprintf("Found an %s of confidence %d that needs to be protected", animal, conf)
+ 					log.Debug(disablingReason)
+@@ -116,7 +119,7 @@ func processSimpleOutput(config *CommsConfig, eventSignals chan event) error {
+ 					break
+ 				}
+ 
+-				trap, animal, conf := v.Species.MatchSpeciesWithConfidence(config.TrapSpecies)
++				trap, animal, conf := v.Species.MatchSpeciesWithConfidence(config.TrapConfig.TargetSpecies)
+ 				if trap {
+ 					enablingReason = fmt.Sprintf("Found an %s of confidence %d that needs to be trapped", animal, conf)
+ 					log.Debug(enablingReason)
+diff --git a/internal/tc2-hat-comms/trap-control.go b/internal/tc2-hat-comms/trap-control.go
+index af53252..4b19792 100644
+--- a/internal/tc2-hat-comms/trap-control.go
++++ b/internal/tc2-hat-comms/trap-control.go
+@@ -163,15 +163,18 @@ func trapState(config *CommsConfig, protect, trap sighting, now time.Time) (enab
+ 	if config.LowPowerMode {
+ 		return false, "Camera is in low power mode, so it can't enable the trap", nil
+ 	}
+-	if !protect.time.IsZero() && protect.time.Add(config.ProtectDuration).After(now) {
++	if !config.TrapConfig.Enabled {
++		return false, "Trap is disabled in the trap settings", nil
++	}
++	if !protect.time.IsZero() && protect.time.Add(config.TrapConfig.ProtectDuration).After(now) {
+ 		return false, fmt.Sprintf("Found an %s of confidence %d that needs to be protected (seen at %s)",
+ 			protect.animal, protect.confidence, protect.time.Format("15:04:05")), &protect
+ 	}
+-	if !trap.time.IsZero() && trap.time.Add(config.TrapDuration).After(now) {
++	if !trap.time.IsZero() && trap.time.Add(config.TrapConfig.TrapDuration).After(now) {
+ 		return true, fmt.Sprintf("Found an %s of confidence %d that needs to be trapped (seen at %s)",
+ 			trap.animal, trap.confidence, trap.time.Format("15:04:05")), &trap
+ 	}
+-	if config.TrapEnabledByDefault {
++	if config.TrapConfig.EnabledByDefault() {
+ 		return true, "No protect or trap species seen recently, trap is enabled by default", nil
+ 	}
+ 	return false, "No protect or trap species seen recently, trap is disabled by default", nil
+@@ -270,7 +273,7 @@ func classificationChecks(config *CommsConfig, eventSignals chan event, messenge
+ 		firstCheck = false
+ 
+ 		var delay = 10 * time.Second
+-		trapDisableTime := lastTrapSighting.time.Add(config.TrapDuration)
++		trapDisableTime := lastTrapSighting.time.Add(config.TrapConfig.TrapDuration)
+ 		if trapEnabled && time.Until(trapDisableTime) < delay {
+ 			delay = time.Until(trapDisableTime)
+ 		}
+@@ -283,14 +286,14 @@ func classificationChecks(config *CommsConfig, eventSignals chan event, messenge
+ 				log.Debugf("Received tracking event: %+v", v)
+ 				trackStartTime = v.TrackStartTime
+ 
+-				protect, animal, conf := v.Species.MatchSpeciesWithConfidence(config.ProtectSpecies)
++				protect, animal, conf := v.Species.MatchSpeciesWithConfidence(config.TrapConfig.ProtectSpecies)
+ 				if protect {
+ 					log.Debugf("Found an %s of confidence %d that needs to be protected", animal, conf)
+ 					lastProtectSighting = sighting{time: time.Now(), animal: animal, confidence: conf}
+ 					break
+ 				}
+ 
+-				trap, animal, conf := v.Species.MatchSpeciesWithConfidence(config.TrapSpecies)
++				trap, animal, conf := v.Species.MatchSpeciesWithConfidence(config.TrapConfig.TargetSpecies)
+ 				if trap {
+ 					log.Debugf("Found an %s of confidence %d that needs to be trapped", animal, conf)
+ 					lastTrapSighting = sighting{time: time.Now(), animal: animal, confidence: conf}
+diff --git a/internal/tc2-hat-comms/trap-control_test.go b/internal/tc2-hat-comms/trap-control_test.go
+index 6787ab1..5547050 100644
+--- a/internal/tc2-hat-comms/trap-control_test.go
++++ b/internal/tc2-hat-comms/trap-control_test.go
+@@ -21,6 +21,7 @@ func TestTrapState(t *testing.T) {
+ 		name             string
+ 		enabledByDefault bool
+ 		lowPowerMode     bool
++		disabled         bool
+ 		protect          sighting
+ 		trap             sighting
+ 		wantEnabled      bool
+@@ -90,14 +91,27 @@ func TestTrapState(t *testing.T) {
+ 			wantEnabled:      false,
+ 			wantReason:       "Camera is in low power mode, so it can't enable the trap",
+ 		},
++		{
++			name:             "disabled in the trap settings",
++			enabledByDefault: true,
++			disabled:         true,
++			trap:             possum(10 * time.Second),
++			wantEnabled:      false,
++			wantReason:       "Trap is disabled in the trap settings",
++		},
+ 	}
+ 
+ 	for _, tt := range tests {
+ 		t.Run(tt.name, func(t *testing.T) {
+-			conf := &CommsConfig{Comms: config.Comms{
+-				TrapEnabledByDefault: tt.enabledByDefault,
+-				ProtectDuration:      time.Minute,
+-				TrapDuration:         2 * time.Minute,
++			defaultState := config.TrapSafe
++			if tt.enabledByDefault {
++				defaultState = config.TrapArmed
++			}
++			conf := &CommsConfig{TrapConfig: config.Trap{
++				Enabled:         !tt.disabled,
++				DefaultState:    defaultState,
++				ProtectDuration: time.Minute,
 +				TrapDuration:    2 * time.Minute,
-+				ProtectDuration: 5 * time.Minute,
-+			},
-+			TrapSpecies:    tracks.Species{"cat": 70},
-+			ProtectSpecies: tracks.Species{"bird": 50},
-+		}
-+	}
-+
-+	// The trap isn't enabled, so the comms settings are used.
-+	c := atESL()
-+	c.TrapConfig = config.Trap{TargetSpecies: map[string]int32{"possum": 80}}
-+	applyTrapSettings(c)
-+	assert.Equal(t, "at-esl", c.CommsOut)
-+	assert.Equal(t, tracks.Species{"cat": 70}, c.TrapSpecies)
-+
-+	for _, test := range []struct {
-+		defaultState     string
-+		enabledByDefault bool
-+		// Armed ignores classifications, so the species have no effect.
-+		trapSpecies, protectSpecies tracks.Species
-+	}{
-+		{config.TrapArmed, true, nil, nil},
-+		{config.TrapSafe, false, tracks.Species{"possum": 80}, tracks.Species{"kiwi": 80}},
-+		{"", true, nil, nil},
-+	} {
-+		c := atESL()
-+		c.TrapConfig = config.Trap{
-+			Enabled:        true,
-+			DefaultState:   test.defaultState,
-+			TargetSpecies:  map[string]int32{"possum": 80},
-+			ProtectSpecies: map[string]int32{"kiwi": 80},
-+		}
-+		applyTrapSettings(c)
-+		assert.True(t, c.Enable)
-+		assert.Equal(t, "trap-control", c.CommsOut)
-+		assert.Equal(t, test.enabledByDefault, c.TrapEnabledByDefault, "default state %q", test.defaultState)
-+		assert.Equal(t, test.trapSpecies, c.TrapSpecies, "default state %q", test.defaultState)
-+		assert.Equal(t, test.protectSpecies, c.ProtectSpecies, "default state %q", test.defaultState)
-+		// The portal doesn't set durations, so the comms ones are kept.
-+		assert.Equal(t, 2*time.Minute, c.TrapDuration)
-+		assert.Equal(t, 5*time.Minute, c.ProtectDuration)
-+	}
-+}
+ 			}, LowPowerMode: tt.lowPowerMode}
+ 			enabled, reason, trigger := trapState(conf, tt.protect, tt.trap, now)
+ 			assert.Equal(t, tt.wantEnabled, enabled)

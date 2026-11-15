@@ -135,7 +135,8 @@ See `scripts/guest-setup.sh`. In short:
   from PyPI into its venv, as saltops installs them. The SD card image is older
   than what salt keeps devices on. `scripts/update-versions.sh [channel]` re-pins
   them from [salt-version-info](https://github.com/TheCacophonyProject/salt-version-info)
-  (default `prod`, the image's `tc2-prod` salt environment); then `make image`.
+  (default `test`, to try releases before they reach prod devices; the image's
+  own salt environment is `tc2-prod`); then `make image`.
 - `device-register` registers with the test API instead of production (see below).
 - `salt-minion`, `salt-updater`, swap, `rpi-eeprom-update` and `sshswitch` are
   disabled; add `tc2-emu.enable=<service>` to the kernel command line to enable one.
@@ -180,7 +181,7 @@ and registers a new device; use `TC2_PERSIST=1` to keep the registration.
 The Rust workspace in `crates/` stands in for the TC2 HAT:
 
 - `tc2-emu-hw` runs in the container and models the devices on the HAT's I2C bus:
-  the ATtiny power controller (0x25, firmware v1.0.10), PCF8563 RTC (0x51), AHT20
+  the ATtiny power controller (0x25, firmware v1.1.0), PCF8563 RTC (0x51), AHT20
   temperature/humidity sensor (0x38) and the hardware EEPROM (0x50, power PCB v0.7.0).
 - `tc2-emu-i2c` replaces `tc2-hat-i2c` in the guest. All TC2 software reaches the
   I2C bus through its `org.cacophony.i2c.Tx` D-Bus method, which it forwards to
@@ -245,6 +246,16 @@ version in `guest/versions/packages.txt`, so it matches the rest of the image:
 - `go-config`, for `cacophony-config-sync`: when the device in the config file
   changes, as reregistering through Sidekick does, authenticate as the new device.
   Otherwise it carries on syncing settings with the old one until it restarts.
+- `device-register` (`scripts/build-device-register.sh`), with `go-api`: after
+  registering, `--start-services` starts what a reboot would, rather than
+  rebooting. That's the services systemd skipped at boot because the device wasn't
+  registered (they need `/etc/salt/minion_id`), and those waiting to restart after
+  failing for that reason, such as `cacophony-config-sync`. Meanwhile it sets the
+  salt grains (`salt-call --local`), which go-api can't for a new device, as it
+  tries before there's a minion ID; salt-minion and salt-updater start once
+  they're set. go-api sets the running
+  hostname and restarts avahi-daemon so mDNS advertises the new name, which also
+  applies when managementd reregisters the device.
 
 ## End-to-end tests
 

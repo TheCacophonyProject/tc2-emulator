@@ -1,3 +1,68 @@
+diff --git a/comms.go b/comms.go
+index 82c2a0a..8e149c6 100644
+--- a/comms.go
++++ b/comms.go
+@@ -35,27 +35,19 @@ func init() {
+ }
+ 
+ type Comms struct {
+-	Enable               bool   `mapstructure:"enable"`
+-	TrapEnabledByDefault bool   `mapstructure:"trap-enabled-by-default"` // If no animals are seen should the trap be enabled or not.
+-	CommsOut             string `mapstructure:"comms-out"`               // "uart" or "high-low"
+-	Bluetooth            bool   `mapstructure:"bluetooth"`               // Bluetooth can only be enabled if UART is not in use.
++	Enable    bool   `mapstructure:"enable"`
++	CommsOut  string `mapstructure:"comms-out"` // "uart" or "high-low"
++	Bluetooth bool   `mapstructure:"bluetooth"` // Bluetooth can only be enabled if UART is not in use.
+ 
+ 	PowerOutput     string        `mapstructure:"power-output"`      // "on", "off", "comms-only"
+ 	PowerUpDuration time.Duration `mapstructure:"power-up-duration"` // When PowerOutput is set to "comms-only" how long should it be powered up before sending data.
+ 
+-	TrapSpecies  map[string]int32 `mapstructure:"trap-species"`  // Species with set confidence to trap
+-	TrapDuration time.Duration    `mapstructure:"trap-duration"` // How long to keep a trap active for after seeing a trapped species
+-
+-	ProtectSpecies  map[string]int32 `mapstructure:"protect-species"`  // Species with set confidence to protect
+-	ProtectDuration time.Duration    `mapstructure:"protect-duration"` // How long to keep a trap inactive for after seeing a protected species
+-
++	// What the output does for the classifications is in the trap section.
+ }
+ 
+ func DefaultComms() Comms {
+ 	return Comms{
+-		Enable:          false,
+-		TrapDuration:    time.Minute,
+-		ProtectDuration: time.Minute,
++		Enable: false,
+ 	}
+ }
+ 
+diff --git a/config_test.go b/config_test.go
+index 7b25d62..edd829c 100644
+--- a/config_test.go
++++ b/config_test.go
+@@ -513,11 +513,11 @@ func TestOverwritingMaps(t *testing.T) {
+ 	require.NoError(t, err)
+ 
+ 	// Make multiple writes to a map
+-	config1 := map[string]any{"comms": map[string]any{"trap-species": map[string]any{"dog": int64(90)}}}
+-	config2 := map[string]any{"comms": map[string]any{"trap-species": map[string]any{"cat": int64(90)}}}
++	config1 := map[string]any{"trap": map[string]any{"target-species": map[string]any{"dog": int64(90)}}}
++	config2 := map[string]any{"trap": map[string]any{"target-species": map[string]any{"cat": int64(90)}}}
+ 	err = conf.SetMultipleSections(config1)
+ 	require.NoError(t, err)
+-	//conf.Unset("comms.trap-species")
++	//conf.Unset("trap.target-species")
+ 	err = conf.SetMultipleSections(config2)
+ 	require.NoError(t, err)
+ 
+@@ -527,7 +527,7 @@ func TestOverwritingMaps(t *testing.T) {
+ 
+ 	configExpected := config2
+ 	actualConfig := conf.v.AllSettings()
+-	delete(actualConfig["comms"].(map[string]any), "updated")
++	delete(actualConfig["trap"].(map[string]any), "updated")
+ 
+ 	require.Equal(t, configExpected, actualConfig)
+ }
 diff --git a/internal/cacophony-config-sync/main.go b/internal/cacophony-config-sync/main.go
 index 71c38ea..3ee998a 100644
 --- a/internal/cacophony-config-sync/main.go
@@ -119,18 +184,21 @@ index 71c38ea..3ee998a 100644
  
  type CacophonyAPIInterface interface {
 diff --git a/internal/cacophony-config-sync/main_test.go b/internal/cacophony-config-sync/main_test.go
-index 71a9fc8..d05a6e2 100644
+index 71a9fc8..9a860df 100644
 --- a/internal/cacophony-config-sync/main_test.go
 +++ b/internal/cacophony-config-sync/main_test.go
-@@ -552,6 +552,115 @@ updated = ` + older + `
+@@ -552,6 +552,120 @@ updated = ` + older + `
  	}
  }
  
 +func TestSyncTrapFromPortal(t *testing.T) {
-+	// The trap's own config, sent to it by tc2-hat-comms, isn't synced.
++	// The trap's own config, sent to it by tc2-hat-comms, and the durations
++	// aren't synced.
 +	s, api := newSyncService(t, `
 +[trap]
 +config = {cage_doors = 2}
++trap-duration = "5m"
++protect-duration = "1h"
 +updated = `+older+`
 +`, map[string]any{
 +		"trap": map[string]any{
@@ -163,6 +231,8 @@ index 71a9fc8..d05a6e2 100644
 +	assert.Equal(t, map[string]int32{"possum": 80}, trap.TargetSpecies)
 +	assert.Empty(t, trap.ProtectSpecies)
 +	assert.Equal(t, map[string]any{"cage_doors": int64(2)}, trap.Config)
++	assert.Equal(t, 5*time.Minute, trap.TrapDuration)
++	assert.Equal(t, time.Hour, trap.ProtectDuration)
 +}
 +
 +func TestSyncTrapToPortal(t *testing.T) {
@@ -239,20 +309,25 @@ index 71a9fc8..d05a6e2 100644
  	s, _ := newSyncService(t, `
  [windows]
 diff --git a/trap.go b/trap.go
-index af882bc..80d4488 100644
+index af882bc..6b85bf8 100644
 --- a/trap.go
 +++ b/trap.go
-@@ -8,11 +8,21 @@ import (
+@@ -4,15 +4,26 @@ import (
+ 	"encoding/json"
+ 	"fmt"
+ 	"reflect"
++	"time"
+ )
  
  const TrapKey = "trap"
  
 +// Trap default states.
 +const (
-+	// TrapArmed has the trap trigger on any movement, ignoring classifications, so the
-+	// species to trap and protect have no effect.
++	// TrapArmed has the trap trigger on any movement, unless a species to protect has
++	// been seen recently.
 +	TrapArmed = "armed"
-+	// TrapSafe has the trap arm only while a species to trap has been classified, and
-+	// no species to protect.
++	// TrapSafe has the trap trigger only while a species to trap has been seen
++	// recently, and no species to protect.
 +	TrapSafe = "safe"
 +)
 +
@@ -265,12 +340,15 @@ index af882bc..80d4488 100644
  		defaultValue: func() any {
  			return DefaultTrap()
  		},
-@@ -23,12 +33,23 @@ func init() {
+@@ -22,16 +33,41 @@ func init() {
+ 	}
  }
  
++// Trap is how comms acts on classifications to control a trap, whichever output it uses.
  type Trap struct {
 -	Config map[string]any `mapstructure:"config"`
-+	// Enabled is set when the camera is controlling a trap, as set on the web portal.
++	// Enabled turns acting on classifications on, as set on the web portal. It only has
++	// an effect when comms is enabled too.
 +	Enabled bool `mapstructure:"enabled"`
 +	// DefaultState is TrapArmed or TrapSafe, with TrapArmed when it's empty.
 +	DefaultState string `mapstructure:"default-state"`
@@ -278,6 +356,10 @@ index af882bc..80d4488 100644
 +	TargetSpecies map[string]int32 `mapstructure:"target-species"`
 +	// ProtectSpecies are the species that disable the trap, with the confidence needed for each.
 +	ProtectSpecies map[string]int32 `mapstructure:"protect-species"`
++	// TrapDuration is how long to keep the trap enabled for after seeing a species to trap.
++	TrapDuration time.Duration `mapstructure:"trap-duration"`
++	// ProtectDuration is how long to keep the trap disabled for after seeing a species to protect.
++	ProtectDuration time.Duration `mapstructure:"protect-duration"`
 +	// Config is sent to the trap as its config.json.
 +	Config  map[string]any `mapstructure:"config"`
 +	Updated any            `mapstructure:"updated,omitempty"`
@@ -286,20 +368,42 @@ index af882bc..80d4488 100644
  func DefaultTrap() Trap {
  	return Trap{
 -		Config: map[string]any{},
-+		DefaultState: TrapArmed,
-+		Config:       map[string]any{},
++		DefaultState:    TrapArmed,
++		TrapDuration:    time.Minute,
++		ProtectDuration: time.Minute,
++		Config:          map[string]any{},
  	}
  }
  
-@@ -40,6 +61,33 @@ func trapMapToStruct(m map[string]any) (any, error) {
++// EnabledByDefault is whether the trap is enabled when no species to trap or protect
++// have been seen recently.
++func (t Trap) EnabledByDefault() bool {
++	return t.DefaultState != TrapSafe
++}
++
+ func trapMapToStruct(m map[string]any) (any, error) {
+ 	var s Trap
+ 	if err := decodeStructFromMap(&s, m, jsonStringToMap); err != nil {
+@@ -40,6 +76,44 @@ func trapMapToStruct(m map[string]any) (any, error) {
  	return s, nil
  }
  
 +// trapValidateFunc validates a trap section, which can be just the keys being set.
 +func trapValidateFunc(trap any) error {
-+	t, err := ConvertToStruct[Trap](trap)
++	var t Trap
++	var err error
++	if m, ok := trap.(map[string]any); ok {
++		// Decoded as the section is, so that durations can be strings like "1m", but
++		// not with the config as a JSON string, which is only converted by SetFromMap.
++		err = decodeStructFromMap(&t, m, nil)
++	} else {
++		t, err = ConvertToStruct[Trap](trap)
++	}
 +	if err != nil {
 +		return err
++	}
++	if t.TrapDuration < 0 || t.ProtectDuration < 0 {
++		return fmt.Errorf("durations can't be negative")
 +	}
 +	if t.DefaultState != "" && t.DefaultState != TrapArmed && t.DefaultState != TrapSafe {
 +		return fmt.Errorf("default state must be %q or %q, got %q", TrapArmed, TrapSafe, t.DefaultState)
@@ -327,14 +431,15 @@ index af882bc..80d4488 100644
  		return data, nil
 diff --git a/trap_test.go b/trap_test.go
 new file mode 100644
-index 0000000..b3f60f0
+index 0000000..103bba2
 --- /dev/null
 +++ b/trap_test.go
-@@ -0,0 +1,63 @@
+@@ -0,0 +1,92 @@
 +package config
 +
 +import (
 +	"testing"
++	"time"
 +
 +	"github.com/stretchr/testify/assert"
 +	"github.com/stretchr/testify/require"
@@ -348,18 +453,21 @@ index 0000000..b3f60f0
 +		"default-state":   TrapSafe,
 +		"target-species":  map[string]any{"possum": 80},
 +		"protect-species": map[string]any{"kiwi": 100, "bird": 0},
++		"trap-duration":   "5m",
 +		"config":          map[string]any{"cage_doors": 2},
 +	}))
 +
 +	for name, invalid := range map[string]map[string]any{
-+		"default state":    {"default-state": "maybe"},
-+		"confidence":       {"target-species": map[string]any{"possum": 101}},
-+		"negative":         {"protect-species": map[string]any{"kiwi": -1}},
-+		"empty species":    {"target-species": map[string]any{"": 80}},
-+		"trap and protect": {"target-species": map[string]any{"kiwi": 80}, "protect-species": map[string]any{"kiwi": 80}},
++		"default state":     {"default-state": "maybe"},
++		"confidence":        {"target-species": map[string]any{"possum": 101}},
++		"negative":          {"protect-species": map[string]any{"kiwi": -1}},
++		"empty species":     {"target-species": map[string]any{"": 80}},
++		"duration":          {"protect-duration": "soon"},
++		"negative duration": {"trap-duration": "-1m"},
++		"trap and protect":  {"target-species": map[string]any{"kiwi": 80}, "protect-species": map[string]any{"kiwi": 80}},
 +		// SetFromMap converts a JSON string first; set as is, it couldn't be read back.
-+		"config":           {"config": `{"cage_doors": 2}`},
-+		"unknown key":      {"not-a-key": true},
++		"config":      {"config": `{"cage_doors": 2}`},
++		"unknown key": {"not-a-key": true},
 +	} {
 +		assert.Error(t, trapValidateFunc(invalid), name)
 +	}
@@ -386,11 +494,36 @@ index 0000000..b3f60f0
 +
 +	conf, err = New(DefaultConfigDir)
 +	require.NoError(t, err)
-+	var trap Trap
++	// Readers start from the defaults, for what the config leaves out.
++	trap := DefaultTrap()
 +	require.NoError(t, conf.Unmarshal(TrapKey, &trap))
 +	assert.True(t, trap.Enabled)
 +	assert.Equal(t, TrapSafe, trap.DefaultState)
 +	// Species maps are replaced, not added to.
 +	assert.Equal(t, map[string]int32{"possum": 70}, trap.TargetSpecies)
 +	assert.Equal(t, map[string]any{"cage_doors": float64(2)}, trap.Config)
++	assert.Equal(t, time.Minute, trap.TrapDuration, "default")
++	assert.Equal(t, time.Minute, trap.ProtectDuration, "default")
++
++	// Durations as Sidekick sends them.
++	require.NoError(t, conf.SetMultipleSections(map[string]any{
++		"trap": map[string]any{"trap-duration": "5m", "protect-duration": "1h"},
++	}))
++	conf, err = New(DefaultConfigDir)
++	require.NoError(t, err)
++	trap = DefaultTrap()
++	require.NoError(t, conf.Unmarshal(TrapKey, &trap))
++	assert.Equal(t, 5*time.Minute, trap.TrapDuration)
++	assert.Equal(t, time.Hour, trap.ProtectDuration)
++	assert.Equal(t, map[string]int32{"possum": 70}, trap.TargetSpecies)
++}
++
++func TestTrapSettingsNotInComms(t *testing.T) {
++	defer newFs(t, "")()
++	conf, err := New(DefaultConfigDir)
++	require.NoError(t, err)
++	// They are all in the trap section now.
++	for _, key := range []string{"trap-enabled-by-default", "trap-species", "trap-duration", "protect-species", "protect-duration"} {
++		assert.Error(t, conf.SetFromMap(CommsKey, map[string]any{key: "1m"}, false), key)
++	}
 +}

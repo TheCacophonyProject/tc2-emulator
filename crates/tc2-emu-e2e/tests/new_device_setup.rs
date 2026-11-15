@@ -20,7 +20,7 @@ fn new_device_setup() -> anyhow::Result<()> {
         println!("Created the new project");
     }
 
-    // The emulated device registers itself into `new` on first boot, then reboots.
+    // The emulated device registers itself into `new` on first boot.
     let registered = wait_for("device to register", Duration::from_secs(300), || {
         Ok(device.device_info().ok().filter(|info| info.device_id != 0))
     })?;
@@ -48,8 +48,13 @@ fn new_device_setup() -> anyhow::Result<()> {
     );
     println!("Moved device to {project} as {name} ({})", moved.device_id);
 
-    // The user takes a test recording from the web UI or Sidekick.
-    // tc2-agent may still be starting after the device's post-registration reboot.
+    // The user takes a test recording from the web UI or Sidekick. Not straight
+    // away, as the emulated device saves it at once: the guest's clock, set from
+    // the RTC at boot, can be up to a second behind the API's, and the API files a
+    // recording under the device registered at its time, so one made straight
+    // after reregistering would go to the old device.
+    std::thread::sleep(Duration::from_millis(1500));
+    // managementd may still be starting after the device registers.
     let requested_at = Utc::now();
     let reply = wait_for("tc2-agent to take a test recording", Duration::from_secs(60), || {
         device.take_short_test_recording().map(Some)

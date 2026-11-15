@@ -1,0 +1,167 @@
+diff --git a/config.go b/config.go
+index 50435f4..663afec 100644
+--- a/config.go
++++ b/config.go
+@@ -21,6 +21,7 @@ import (
+ 	"context"
+ 	"errors"
+ 	"fmt"
++	"os"
+ 	"path"
+ 	"reflect"
+ 	"strings"
+@@ -349,7 +350,7 @@ func (c *Config) unset(key string) error {
+ 		return err
+ 	}
+ 	delete(deepestMap, path[len(path)-1])
+-	tomlTree, err := toml.TreeFromMap(configMap)
++	configTOML, err := encodeTOML(configMap)
+ 	if err != nil {
+ 		return err
+ 	}
+@@ -358,12 +359,7 @@ func (c *Config) unset(key string) error {
+ 	c.v = viper.New()
+ 	c.v.SetFs(fs)
+ 	c.v.SetConfigFile(configFile)
+-	var buf bytes.Buffer
+-	_, err = tomlTree.WriteTo(&buf)
+-	if err != nil {
+-		return err
+-	}
+-	if err := c.v.ReadConfig(bytes.NewReader(buf.Bytes())); err != nil {
++	if err := c.v.ReadConfig(bytes.NewReader(configTOML)); err != nil {
+ 		return err
+ 	}
+ 	c.v.Set(path[0]+".updated", now())
+@@ -438,13 +434,62 @@ func (c *Config) write() error {
+ 		return err
+ 	}
+ 	defer c.fileLock.Unlock()
+-	if err := c.v.WriteConfig(); err != nil {
++	if err := c.writeConfigFile(); err != nil {
+ 		return err
+ 	}
+ 	c.unwritten = false
+ 	return nil
+ }
+ 
++// writeConfigFile writes the config file as viper does, but keeping fractions of a
++// second in times.
++func (c *Config) writeConfigFile() error {
++	configTOML, err := encodeTOML(c.v.AllSettings())
++	if err != nil {
++		return err
++	}
++	f, err := fs.OpenFile(c.v.ConfigFileUsed(), os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0644)
++	if err != nil {
++		return err
++	}
++	defer f.Close()
++	if _, err := f.Write(configTOML); err != nil {
++		return err
++	}
++	return f.Sync()
++}
++
++// encodeTOML encodes settings as TOML, as viper does, but with times to the
++// nanosecond. go-toml writes them to the second, so a section changed twice in a
++// second, as can happen when a sync takes settings and they are then changed on the
++// device, would be marked as updated at the same time both times.
++func encodeTOML(settings map[string]any) ([]byte, error) {
++	tree, err := toml.TreeFromMap(settings)
++	if err != nil {
++		return nil, err
++	}
++	keepTimeFractions(tree)
++	configTOML, err := tree.ToTomlString()
++	return []byte(configTOML), err
++}
++
++// keepTimeFractions replaces the times in tree with TOML date-times to the
++// nanosecond, which go-toml writes as they are.
++func keepTimeFractions(tree *toml.Tree) {
++	for _, key := range tree.Keys() {
++		switch value := tree.GetPath([]string{key}).(type) {
++		case *toml.Tree:
++			keepTimeFractions(value)
++		case []*toml.Tree:
++			for _, subtree := range value {
++				keepTimeFractions(subtree)
++			}
++		case time.Time:
++			tree.SetPath([]string{key}, []byte(value.Format(time.RFC3339Nano)))
++		}
++	}
++}
++
+ func notSectionKeyError(key string) error {
+ 	return fmt.Errorf("'%s' is not a key for a section", key)
+ }
+diff --git a/internal/cacophony-config-sync/main.go b/internal/cacophony-config-sync/main.go
+index 9581c5a..f1e594c 100644
+--- a/internal/cacophony-config-sync/main.go
++++ b/internal/cacophony-config-sync/main.go
+@@ -560,9 +560,9 @@ func (s *SyncService) filterUnchangedSettings(mappedSettings, deviceSettings map
+ 
+ 			// Taking the same settings again would only write the config again,
+ 			// restarting the services that use it. This happens as times are kept
+-			// to different precisions: the config keeps them to the second, though
+-			// the device can upload them to the nanosecond, and the web portal to
+-			// the millisecond, so the API's can look newer.
++			// to different precisions: older software writes the config's to the
++			// second, though the device can upload them to the nanosecond, and the
++			// web portal to the millisecond, so the API's can look newer.
+ 			if sameSettings(section, mappedSection, deviceSection) {
+ 				log.Printf("Filtering out section %s: the device has the same settings", section.Key)
+ 				continue
+diff --git a/time_fraction_test.go b/time_fraction_test.go
+new file mode 100644
+index 0000000..02524d1
+--- /dev/null
++++ b/time_fraction_test.go
+@@ -0,0 +1,45 @@
++package config
++
++import (
++	"path"
++	"strings"
++	"testing"
++	"time"
++
++	toml "github.com/pelletier/go-toml"
++	"github.com/spf13/afero"
++	"github.com/stretchr/testify/assert"
++	"github.com/stretchr/testify/require"
++)
++
++func TestTimesKeepFractionsOfASecond(t *testing.T) {
++	newFsWithConfig(t, sectionsToChange)
++	updated := time.Date(2026, 11, 11, 14, 26, 29, 836123456, time.FixedZone("NZDT", 13*3600))
++	defer func(n func() time.Time) { now = n }(now)
++	now = func() time.Time { return updated }
++
++	conf, err := New(DefaultConfigDir)
++	require.NoError(t, err)
++	require.NoError(t, conf.SetFromMap(WindowsKey, map[string]any{"start-recording": "22:00"}, false))
++	// Then another section, which unsets keys, rebuilding the settings.
++	now = func() time.Time { return updated.Add(time.Millisecond) }
++	require.NoError(t, conf.SetFromMap(AudioRecordingKey, map[string]any{"audio-mode": "AudioOnly"}, false))
++
++	content, err := afero.ReadFile(fs, path.Join(DefaultConfigDir, ConfigFileName))
++	require.NoError(t, err)
++	// A TOML date-time, which older versions read too.
++	assert.Contains(t, string(content), "updated = 2026-11-11T14:26:29.836123456+13:00")
++	tree, err := toml.LoadBytes(content)
++	require.NoError(t, err)
++	assert.True(t, updated.Equal(tree.GetPath([]string{"windows", "updated"}).(time.Time)))
++
++	conf, err = New(DefaultConfigDir)
++	require.NoError(t, err)
++	var windows Windows
++	require.NoError(t, conf.Unmarshal(WindowsKey, &windows))
++	assert.True(t, updated.Equal(windows.Updated), "got %v", windows.Updated)
++	var audio AudioRecording
++	require.NoError(t, conf.Unmarshal(AudioRecordingKey, &audio))
++	assert.True(t, updated.Add(time.Millisecond).Equal(audio.Updated), "got %v", audio.Updated)
++	assert.False(t, strings.Contains(string(content), `updated = "`), "not as strings")
++}
