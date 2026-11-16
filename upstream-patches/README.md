@@ -25,3 +25,9 @@ Each is against the repo's main branch at the time.
   do nothing useful; `nfsrahead` runs and fails for every block device; and console-setup's udev
   rules set each virtual console's font and UTF-8 mode, for an HDMI console nobody uses.
   Against dev at 8b8efca (2026-11-17).
+- `saltops/0003-remove-man-defer-logrotate.patch`: on top of 0002. Purges `man-db`, `manpages`,
+  `manpages-dev` and `groff-base` (nobody reads a manpage on a TC2, and man-db's dpkg trigger
+  rebuilds its index on package installs such as salt's updates), replacing the state that only
+  disabled `man-db.timer`. Adds a `logrotate.timer` drop-in so logrotate runs 5 minutes after
+  boot and then daily, instead of straight away at boot to catch up (the timer is `Persistent`).
+  Against dev at 8b8efca (2026-11-17).

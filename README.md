@@ -147,6 +147,9 @@ See `scripts/guest-setup.sh`. In short:
   is faked) and the commands it can't run, and the node group is left as `tc2-prod`. The
   build fails if a state fails that isn't in `guest/salt/expected-failures.txt`, or if a
   package would change version, which means `packages.txt` and `saltops.txt` have drifted.
+- `man-db` and the manpages are purged, and `logrotate` first runs 5 minutes after boot
+  instead of at boot (`logrotate.timer.d/tc2.conf`), so neither takes CPU while the system
+  starts.
 - `console-setup` is purged too (its udev rules set up each virtual console, ~1s of CPU at
   boot, for an HDMI console nobody uses).
 - `ifupdown` and `nfs-common` are purged, and `eth0` is configured by a `tc2-emu-eth0`

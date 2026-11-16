@@ -1,0 +1,54 @@
+diff --git a/tc2/basics/init.sls b/tc2/basics/init.sls
+index 8e860d1..e09934b 100644
+--- a/tc2/basics/init.sls
++++ b/tc2/basics/init.sls
+@@ -44,11 +44,6 @@ disable_apt_daily_upgrade_timer:
+     - name: apt-daily-upgrade.timer
+     - enable: False
+ 
+-disable_man_db_services:
+-  service.dead:
+-    - name: man-db.timer
+-    - enable: False
+-
+ manage_swapfile:
+   file.managed:
+     - name: /etc/dphys-swapfile
+@@ -97,3 +92,25 @@ ifupdown-and-nfs-purged:
+       - nfs-common
+       - console-setup
+       - console-setup-linux
++      # Nobody reads a manpage on a TC2, and man-db has a dpkg trigger that rebuilds
++      # its index whenever a package that installs a manpage is installed, such as
++      # salt's updates of the Cacophony packages.
++      - man-db
++      - manpages
++      - manpages-dev
++      - groff-base
++
++# logrotate.timer is Persistent, so it runs at boot to catch up on a missed day, with
++# the rest of the system starting. Run it once the system has been up a while instead,
++# and then daily.
++/etc/systemd/system/logrotate.timer.d/tc2.conf:
++  file.managed:
++    - source: salt://tc2/basics/logrotate-timer.conf
++    - makedirs: True
++    - mode: 644
++
++logrotate-timer-reload:
++  cmd.wait:
++    - name: "systemctl daemon-reload && systemctl try-restart logrotate.timer"
++    - watch:
++      - file: /etc/systemd/system/logrotate.timer.d/tc2.conf
+diff --git a/tc2/basics/logrotate-timer.conf b/tc2/basics/logrotate-timer.conf
+new file mode 100644
+index 0000000..2f91d66
+--- /dev/null
++++ b/tc2/basics/logrotate-timer.conf
+@@ -0,0 +1,6 @@
++[Timer]
++OnCalendar=
++Persistent=false
++AccuracySec=1min
++OnBootSec=5min
++OnUnitActiveSec=1d

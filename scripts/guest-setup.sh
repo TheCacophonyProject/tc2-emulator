@@ -292,6 +292,26 @@ apt-get purge -y ifupdown nfs-common
 # TODO: purge console-setup and console-setup-linux from the real TC2 image too
 # (add them to the pkg.purged in saltops' tc2/basics), then this just matches it.
 apt-get purge -y console-setup console-setup-linux
+# Nobody reads a manpage on a TC2, and man-db has a dpkg trigger that rebuilds its
+# index whenever a package that installs one is installed, as salt's updates do.
+# TODO: purge man-db, manpages, manpages-dev and groff-base from the real TC2 image
+# too (the pkg.purged in saltops' tc2/basics), then this just matches it.
+apt-get purge -y man-db manpages manpages-dev groff-base
+
+# logrotate.timer is Persistent, so it runs at boot to catch up on a missed day, with
+# the rest of the system starting (~5s here, for what are a few KB of apt, dpkg and
+# wtmp logs; journald looks after the rest). Run it once the system has been up a
+# while instead, and then daily.
+# TODO: the same in the real TC2 image (a drop-in from saltops' tc2/basics).
+mkdir -p /etc/systemd/system/logrotate.timer.d
+cat > /etc/systemd/system/logrotate.timer.d/tc2.conf <<'EOF'
+[Timer]
+OnCalendar=
+Persistent=false
+AccuracySec=1min
+OnBootSec=5min
+OnUnitActiveSec=1d
+EOF
 cat > /etc/systemd/system/tc2-emu-eth0.service <<EOF
 [Unit]
 Description=Emulator: address the host link on eth0
