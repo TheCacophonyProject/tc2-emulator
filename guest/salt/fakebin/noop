@@ -1,0 +1,3 @@
+#!/bin/sh
+# Does nothing, where the real command would act on the machine building the image.
+exit 0

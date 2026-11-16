@@ -10,7 +10,7 @@ $(IMAGES)/id_ed25519:
 	mkdir -p $(IMAGES)
 	ssh-keygen -t ed25519 -N '' -C tc2-emulator -f $@
 
-$(IMAGES)/base.qcow2: $(SRC_IMG) $(IMAGES)/id_ed25519 scripts/prepare-image.sh scripts/guest-setup.sh builder/Dockerfile $(wildcard guest/*/*)
+$(IMAGES)/base.qcow2: $(SRC_IMG) $(IMAGES)/id_ed25519 scripts/prepare-image.sh scripts/guest-setup.sh builder/Dockerfile $(wildcard guest/*/*) $(wildcard guest/salt/fakebin/*)
 	docker build -t tc2-emulator-builder builder
 	docker run --rm --privileged -v /dev:/dev -v $(CURDIR):/work -w /work \
 		-e HOST_UID=$(shell id -u) -e HOST_GID=$(shell id -g) \

@@ -84,7 +84,7 @@ flowchart LR
     image --> images[("images/")]
 
     crates["crates/ Rust workspace"] --> stubs["make stubs<br/>stubs-builder container"]
-    versions["guest/versions/packages.txt<br/>salt's released versions"] --> image
+    versions["guest/versions/packages.txt, saltops.txt<br/>salt's released versions and states"] --> image
     versions --> stubs
     hatsrc["tc2-agent, tc2-hat-controller, go-config<br/>+ guest/patches"] --> stubs
     fixtures["fixtures/*.cptv<br/>fetched, not committed"] --> stubs
@@ -137,6 +137,21 @@ See `scripts/guest-setup.sh`. In short:
   them from [salt-version-info](https://github.com/TheCacophonyProject/salt-version-info)
   (default `test`, to try releases before they reach prod devices; the image's
   own salt environment is `tc2-prod`); then `make image`.
+- The rest of what salt deploys is applied too, by running a masterless highstate of
+  the TC2 states from the [saltops](https://github.com/TheCacophonyProject/saltops)
+  commit pinned in `guest/versions/saltops.txt` (the same commit `packages.txt` comes
+  from) in the image's chroot: `guest/salt/apply-salt.sh`. That brings the older image
+  up to date with the config files, models, test recordings and service enablement
+  salt has added since, such as `thermal-recorder-py` running. There's no systemd in the
+  chroot, so `guest/salt/fakebin` stands in for `systemctl` (enabling is real, starting
+  is faked) and the commands it can't run, and the node group is left as `tc2-prod`. The
+  build fails if a state fails that isn't in `guest/salt/expected-failures.txt`, or if a
+  package would change version, which means `packages.txt` and `saltops.txt` have drifted.
+- `console-setup` is purged too (its udev rules set up each virtual console, ~1s of CPU at
+  boot, for an HDMI console nobody uses).
+- `ifupdown` and `nfs-common` are purged, and `eth0` is configured by a `tc2-emu-eth0`
+  service instead of ifupdown. A TC2 uses neither (NetworkManager does the wifi and
+  modem) and they cost ~7s of CPU at boot; the real image should drop them too.
 - `device-register` registers with the test API instead of production (see below).
 - `salt-minion`, `salt-updater`, swap, `rpi-eeprom-update` and `sshswitch` are
   disabled; add `tc2-emu.enable=<service>` to the kernel command line to enable one.
@@ -149,7 +164,9 @@ See `scripts/guest-setup.sh`. In short:
 
 ## Networking and the test API
 
-The image configures `eth0` statically as `192.168.1.2/24` with no gateway. QEMU's
+The emulator's `tc2-emu-eth0` service configures `eth0` statically as `192.168.1.2/24` with no gateway
+(the real image does it through ifupdown, which costs ~12s of boot here, so the emulator drops that
+file). QEMU's
 user network uses that subnet, with the host side at `192.168.1.1`. The guest has
 no route to the internet, so it can't reach production servers.
 

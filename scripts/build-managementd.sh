@@ -7,7 +7,7 @@
 #                                          into <dir> and compiles its TypeScript.
 #   build-managementd.sh go <dir> <output> in a golang container: builds it with
 #                                          the patched go-config and go-api,
-#                                          packing in the web UI.
+#                                          embedding the web UI.
 set -euo pipefail
 
 # The releases the image is updated to (see scripts/update-versions.sh).
@@ -40,8 +40,7 @@ go)
     go mod edit -replace "github.com/TheCacophonyProject/go-config=$DIR/go-config"
     go mod edit -replace "github.com/TheCacophonyProject/go-api=$DIR/go-api"
     go mod tidy
-    go install github.com/gobuffalo/packr/packr@v1.30.1
-    CGO_ENABLED=0 GOOS=linux GOARCH=arm64 "$(go env GOPATH)/bin/packr" build -o "$OUT" \
+    CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o "$OUT" \
         -ldflags "-s -w -X main.version=$VERSION+tc2-emu" ./cmd/managementd
     ;;
 *)

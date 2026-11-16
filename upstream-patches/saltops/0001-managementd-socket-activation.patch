@@ -1,0 +1,39 @@
+diff --git a/tc2/management-interface/init.sls b/tc2/management-interface/init.sls
+index 9df0647..3ec3b5b 100644
+--- a/tc2/management-interface/init.sls
++++ b/tc2/management-interface/init.sls
+@@ -5,20 +5,28 @@ management-interface-pkg:
+     - architecture: "arm64"
+     - branch: tc2
+ 
+-managementd-service:
+-  service.running:
+-    - name: managementd
+-    - enable: True
+-    - watch:
++# managementd is started by managementd.socket when something connects to port 80,
++# and exits again when it has been idle for a while, so nothing needs it running
++# the rest of the time. The package's postinstall script enables the socket, and
++# starts it unless an older managementd is still running and holding port 80. Only
++# enable it here, as starting the socket would fail in that case. It starts below,
++# or at boot.
++managementd-socket:
++  service.enabled:
++    - name: managementd.socket
++    - require:
+       - management-interface-pkg
+ 
+ # This will trigger a restart of managementd 30 seconds after the end of a salt update if needed.
++# Stops managementd and starts the socket, rather than restarting managementd, which
++# wouldn't hand it the socket: it would listen on port 80 itself, and never exit when
++# idle. The socket starts managementd, the new version, when something connects.
+ delayed_restart_managementd:
+   cmd.run:
+     - name: >
+         systemd-run --unit=delayed-managementd-restart.service
+         --on-active=30s
+-        /bin/systemctl restart managementd
++        /bin/sh -c "systemctl stop managementd.service; systemctl start managementd.socket"
+     - shell: /bin/bash
+     - onchanges:
+       - cacophony: tc2-agent-pkg

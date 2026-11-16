@@ -1,0 +1,61 @@
+diff --git a/tc2-top.sls b/tc2-top.sls
+index 91b5954..deb127a 100644
+--- a/tc2-top.sls
++++ b/tc2-top.sls
+@@ -7,7 +7,6 @@ base:
+     - tc2/basics
+     - tc2/auth
+     - tc2/salt-minion
+-    - tc2/network-manager
+     - tc2/rtl8821au
+     - tc2/watchdog
+     - tc2/event-reporter
+diff --git a/tc2/basics/init.sls b/tc2/basics/init.sls
+index c77467f..8e860d1 100644
+--- a/tc2/basics/init.sls
++++ b/tc2/basics/init.sls
+@@ -78,3 +78,22 @@ restart_swap_service:
+   file.managed:
+     - source: salt://tc2/basics/99-allow-downgrades
+     - mode: 0644
++
++# Nothing on a TC2 uses ifupdown or NFS. NetworkManager does the wifi (driven by
++# rpi-net-manager) and the USB modem's usb0, and none of the Cacophony software
++# calls ifup. They only cost CPU at boot: networking.service runs ifupdown's hook
++# scripts, 80-ifupdown.rules runs `ifup --allow=hotplug` for each network device, and
++# 99-nfs.rules runs nfsrahead, which always fails, for each block device.
++# console-setup's udev rules set the font and UTF-8 mode of each virtual console, for the
++# HDMI console, which nobody uses.
++# The eth0 config was only for debugging with a laptop plugged in.
++/etc/network/interfaces.d/eth0:
++  file.absent
++
++ifupdown-and-nfs-purged:
++  pkg.purged:
++    - pkgs:
++      - ifupdown
++      - nfs-common
++      - console-setup
++      - console-setup-linux
+diff --git a/tc2/network-manager/eth0 b/tc2/network-manager/eth0
+deleted file mode 100644
+index e4fe58b..0000000
+--- a/tc2/network-manager/eth0
++++ /dev/null
+@@ -1,4 +0,0 @@
+-auto eth0
+-iface eth0 inet static
+-    address 192.168.1.2
+-    netmask 255.255.255.0
+diff --git a/tc2/network-manager/init.sls b/tc2/network-manager/init.sls
+deleted file mode 100644
+index 818b98a..0000000
+--- a/tc2/network-manager/init.sls
++++ /dev/null
+@@ -1,6 +0,0 @@
+-# For debugging you can disable the modemd service and then connect direclty to the RPi ethernet from your laptop.
+-/etc/network/interfaces.d/eth0:
+-  file.managed:
+-    - makedirs: True
+-    - source: salt://tc2/network-manager/eth0
+-    -  mode: 644

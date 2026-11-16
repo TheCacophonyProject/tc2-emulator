@@ -1,0 +1,66 @@
+#!/bin/bash
+# Stands in for systemctl while salt runs in the image's chroot, where systemd isn't
+# running. Enabling and disabling work offline, so they're left to the real one;
+# the rest is faked, with each unit active from when it's started until it's
+# stopped, which is what salt's service states check afterwards.
+STATE=/run/tc2-emu-fake-systemd
+[[ -z ${TC2_EMU_FAKE_LOG:-} ]] || echo "systemctl $*" >> "$TC2_EMU_FAKE_LOG"
+mkdir -p "$STATE"
+REAL=/usr/bin/systemctl
+cmd=
+units=()
+skip=
+for a in "$@"; do
+    if [[ -n $skip ]]; then skip=; continue; fi
+    case $a in
+    -n | -p | -t | -o | -s | --property | --type | --lines | --output) skip=1 ;;
+    -*) ;;
+    *) if [[ -z $cmd ]]; then cmd=$a; else units+=("$a"); fi ;;
+    esac
+done
+unit() { local u=$1; [[ $u == *.* ]] || u=$u.service; echo "$u"; }
+case $cmd in
+enable | disable | is-enabled | mask | unmask | list-unit-files | cat | reenable | preset)
+    exec "$REAL" "$@"
+    ;;
+start | restart | reload-or-restart | try-restart)
+    for u in "${units[@]}"; do touch "$STATE/$(unit "$u")"; done
+    ;;
+stop)
+    for u in "${units[@]}"; do rm -f "$STATE/$(unit "$u")"; done
+    ;;
+is-active)
+    rc=0
+    for u in "${units[@]}"; do
+        if [[ -e $STATE/$(unit "$u") ]]; then echo active; else echo inactive; rc=3; fi
+    done
+    exit $rc
+    ;;
+is-failed)
+    echo active
+    exit 1
+    ;;
+daemon-reload | daemon-reexec | reset-failed | set-default | isolate) ;;
+status | show)
+    rc=0
+    for u in "${units[@]}"; do
+        u=$(unit "$u")
+        if [[ ! -e /etc/systemd/system/$u && ! -e /lib/systemd/system/$u && ! -e /usr/lib/systemd/system/$u ]]; then
+            echo "Unit $u could not be found."
+            rc=4
+        elif [[ -e $STATE/$u ]]; then
+            echo "     Loaded: loaded"
+            echo "     Active: active (running)"
+        else
+            echo "     Loaded: loaded"
+            echo "     Active: inactive (dead)"
+            [[ $rc == 0 ]] && rc=3
+        fi
+    done
+    exit $rc
+    ;;
+*)
+    exec "$REAL" "$@"
+    ;;
+esac
+exit 0

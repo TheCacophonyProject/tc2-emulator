@@ -1,0 +1,10 @@
+#!/bin/sh
+# Salt starts services with `systemd-run --scope systemctl start ...`: run that
+# (our systemctl is first in the PATH). Anything else, the delayed restarts
+# after an update, is for a running device.
+if [ "$1" = --scope ]; then
+    shift
+    exec "$@"
+fi
+echo "tc2-emu: systemd-run $*" >&2
+exit 0

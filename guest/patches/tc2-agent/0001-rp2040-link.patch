@@ -1,5 +1,5 @@
 diff --git a/src/camera_transfer_state.rs b/src/camera_transfer_state.rs
-index de90fb7..440c70a 100644
+index 09da92d..d2c1125 100644
 --- a/src/camera_transfer_state.rs
 +++ b/src/camera_transfer_state.rs
 @@ -15,6 +15,7 @@ use crate::program_rp2040::{
@@ -112,7 +112,7 @@ index de90fb7..440c70a 100644
      // 65K buffer that we won't fully use at the moment.
      let mut raw_read_buffer = [0u8; 65535];
      let mut got_first_frame = false;
-@@ -313,59 +235,8 @@ pub fn enter_camera_transfer_loop(
+@@ -318,59 +240,8 @@ pub fn enter_camera_transfer_loop(
              }
          }
  
@@ -174,7 +174,7 @@ index de90fb7..440c70a 100644
              {
                  let header_slice = &raw_read_buffer[..header_length];
                  let transfer_type = header_slice[0];
-@@ -406,7 +277,7 @@ pub fn enter_camera_transfer_loop(
+@@ -411,7 +282,7 @@ pub fn enter_camera_transfer_loop(
  
                      LittleEndian::write_u16(&mut return_payload_buf[4..6], 0);
                      LittleEndian::write_u16(&mut return_payload_buf[6..8], 0);
@@ -183,7 +183,7 @@ index de90fb7..440c70a 100644
                      if process_interrupted(&sig_term, &mut dbus_conn) {
                          break 'transfer;
                      }
-@@ -416,7 +287,7 @@ pub fn enter_camera_transfer_loop(
+@@ -421,7 +292,7 @@ pub fn enter_camera_transfer_loop(
                      // warn!("zero-sized payload");
                      LittleEndian::write_u16(&mut return_payload_buf[4..6], 0);
                      LittleEndian::write_u16(&mut return_payload_buf[6..8], 0);
@@ -192,7 +192,7 @@ index de90fb7..440c70a 100644
                      if process_interrupted(&sig_term, &mut dbus_conn) {
                          break 'transfer;
                      }
-@@ -425,7 +296,7 @@ pub fn enter_camera_transfer_loop(
+@@ -430,7 +301,7 @@ pub fn enter_camera_transfer_loop(
                  if !(CAMERA_CONNECT_INFO..=CAMERA_RECORDING_TRANSFER).contains(&transfer_type) {
                      LittleEndian::write_u16(&mut return_payload_buf[4..6], 0);
                      LittleEndian::write_u16(&mut return_payload_buf[6..8], 0);
@@ -201,7 +201,7 @@ index de90fb7..440c70a 100644
  
                      // NOTE: We limit the frequency of this since it can
                      //  spin in this state pretty aggressively.
-@@ -517,7 +388,7 @@ pub fn enter_camera_transfer_loop(
+@@ -525,7 +396,7 @@ pub fn enter_camera_transfer_loop(
                          return_payload_buf[9] = !flag;
                      }
                      // Always write the return buffer
@@ -210,7 +210,7 @@ index de90fb7..440c70a 100644
                      if crc == crc_from_remote {
                          if is_file_transfer_progress_message {
                              recording_state.update_offload_progress(transfer_block);
-@@ -548,6 +419,17 @@ pub fn enter_camera_transfer_loop(
+@@ -556,6 +427,17 @@ pub fn enter_camera_transfer_loop(
                                      medium_power_offloads.no_recordings_left();
                                  }
  
@@ -228,7 +228,7 @@ index de90fb7..440c70a 100644
                                  if firmware_version != EXPECTED_RP2040_FIRMWARE_VERSION {
                                      exit_cleanly(&mut dbus_conn);
                                      info!(
-@@ -568,7 +450,7 @@ pub fn enter_camera_transfer_loop(
+@@ -576,7 +458,7 @@ pub fn enter_camera_transfer_loop(
                                  if offload_erase_requested() {
                                      if num_files_to_offload == 0 {
                                          exit_cleanly(&mut dbus_conn);
@@ -237,7 +237,7 @@ index de90fb7..440c70a 100644
                                      } else if last_handshake_forced_offload {
                                          if offload_erase_tracker.forced_offload_handshake(
                                              num_files_to_offload,
-@@ -582,7 +464,7 @@ pub fn enter_camera_transfer_loop(
+@@ -590,7 +472,7 @@ pub fn enter_camera_transfer_loop(
                                                  flash without offloading them"
                                              );
                                              exit_cleanly(&mut dbus_conn);
@@ -246,7 +246,7 @@ index de90fb7..440c70a 100644
                                          }
                                          info!(
                                              "Offloading {num_files_to_offload} file(s) \
-@@ -986,7 +868,7 @@ pub fn enter_camera_transfer_loop(
+@@ -994,7 +876,7 @@ pub fn enter_camera_transfer_loop(
                          // force transfer to fail rp2040 waits 65 ms so 70 gives us some leeway
                          info!("Forcing transfer to fail as header integrity failed");
                          sleep(Duration::from_millis(70));
@@ -255,7 +255,7 @@ index de90fb7..440c70a 100644
                              .map_err(|e| {
                                  error!("SPI read error: {e:?}");
  
-@@ -997,7 +879,7 @@ pub fn enter_camera_transfer_loop(
+@@ -1005,7 +887,7 @@ pub fn enter_camera_transfer_loop(
                              .unwrap();
                          continue;
                      }
@@ -264,7 +264,7 @@ index de90fb7..440c70a 100644
                          .map_err(|e| {
                              error!("SPI read error: {e:?}");
  
-@@ -1063,7 +945,7 @@ pub fn enter_camera_transfer_loop(
+@@ -1071,7 +953,7 @@ pub fn enter_camera_transfer_loop(
                      // header length is already in num_bytes....?
                      let aligned_offset: usize = (num_bytes + 3) & !3;
  
@@ -274,7 +274,7 @@ index de90fb7..440c70a 100644
                              error!("SPI read error: {e:?}");
  
 diff --git a/src/frame_socket_server.rs b/src/frame_socket_server.rs
-index 58291b7..923f847 100644
+index d2002d9..cb8d8e2 100644
 --- a/src/frame_socket_server.rs
 +++ b/src/frame_socket_server.rs
 @@ -1,13 +1,12 @@
@@ -292,7 +292,7 @@ index 58291b7..923f847 100644
  use std::collections::VecDeque;
  use std::sync::Arc;
  use std::sync::atomic::{AtomicBool, Ordering};
-@@ -170,27 +169,16 @@ fn poll_medium_power_client(
+@@ -175,27 +174,16 @@ fn poll_medium_power_client(
  
  fn restart_rp2040_if_requested(
      restart_rp2040_channel_rx: &Receiver<bool>,
@@ -322,7 +322,7 @@ index 58291b7..923f847 100644
  /// Handles one frame message from the rp2040 while in medium power mode.
  /// In medium power mode the rp2040 wakes up the PI while recording and attempts to send the gzipped
  /// CPTV frames of the current recording to tc2-agent, starting from the first frame to the current frame or end of file if the recording is now finished.
-@@ -212,7 +200,7 @@ fn handle_medium_power_message(
+@@ -217,7 +205,7 @@ fn handle_medium_power_message(
      sent_end: &mut bool,
      received_end: &mut bool,
      ms_elapsed: &mut u64,
@@ -331,16 +331,16 @@ index 58291b7..923f847 100644
      message_handled: &mut bool,
      streamed_recording: &mut Option<StreamedRecording>,
      awaiting_done: &mut VecDeque<u64>,
-@@ -259,7 +247,7 @@ fn handle_medium_power_message(
-                     "New file is missing the GZIP header {:?} restart rp2040",
-                     &frame_data[..FIRST_PACKET_HEADER_LENGTH + 10]
+@@ -286,7 +274,7 @@ fn handle_medium_power_message(
+                     "New file packet {packet_num} is missing the GZIP header {:?} restart rp2040",
+                     &frame_data[..frame_data.len().min(FIRST_PACKET_HEADER_LENGTH + 10)]
                  );
 -                restart_rp2040(run_pin);
 +                rp2040_control.restart();
+                 *waiting_for_restart = Some(Instant::now());
                  // what do we do here???
                  // force rp2040 to offload last file??
-                 // if we could send a message ask for the start again
-@@ -330,7 +318,7 @@ fn handle_medium_power_message(
+@@ -358,7 +346,7 @@ fn handle_medium_power_message(
                      error!(
                          "Lost socket connection part way through medium power offload (Something must have gone wrong)"
                      );
@@ -349,7 +349,7 @@ index 58291b7..923f847 100644
                      *frame_i = 0;
                  } else {
                      info!("Starting new file");
-@@ -402,7 +390,7 @@ pub fn spawn_frame_socket_server_thread(
+@@ -430,7 +418,7 @@ pub fn spawn_frame_socket_server_thread(
      restart_rp2040_channel_rx: Receiver<bool>,
      camera_handshake_channel_rx: Receiver<FrameSocketServerMessage>,
      serve_frames_via_wifi: bool,
@@ -358,7 +358,7 @@ index 58291b7..923f847 100644
      recording_state: &RecordingState,
      medium_power_mode_flag: Arc<AtomicBool>,
  ) {
-@@ -434,7 +422,7 @@ pub fn spawn_frame_socket_server_thread(
+@@ -462,7 +450,7 @@ pub fn spawn_frame_socket_server_thread(
              let mut sockets: [(String, bool, Option<SocketStream>); 2] =
                  [(address, serve_frames_via_wifi, None), (management_address, false, None)];
  
@@ -367,7 +367,7 @@ index 58291b7..923f847 100644
              let mut recv_timeout_ms = 10;
              info!("Connecting to frame sockets");
              let mut ms_elapsed = 0;
-@@ -449,7 +437,7 @@ pub fn spawn_frame_socket_server_thread(
+@@ -480,7 +468,7 @@ pub fn spawn_frame_socket_server_thread(
              let address = &get_socket_address(serve_frames_via_wifi);
              let mut medium_power_mode = medium_power_mode_flag.load(Ordering::Relaxed);
              loop {
@@ -376,7 +376,7 @@ index 58291b7..923f847 100644
                  let new_medium_power_mode = medium_power_mode_flag.load(Ordering::Relaxed);
                  if new_medium_power_mode != medium_power_mode {
                      info!("Switching medium power mode to {new_medium_power_mode}");
-@@ -508,7 +496,7 @@ pub fn spawn_frame_socket_server_thread(
+@@ -540,7 +528,7 @@ pub fn spawn_frame_socket_server_thread(
                          &mut sent_end,
                          &mut received_end,
                          &mut ms_elapsed,
@@ -385,7 +385,7 @@ index 58291b7..923f847 100644
                          &mut message_handled,
                          &mut streamed_recording,
                          &mut awaiting_done,
-@@ -553,6 +541,7 @@ pub fn spawn_frame_socket_server_thread(
+@@ -586,6 +574,7 @@ pub fn spawn_frame_socket_server_thread(
                          &mut prev_frame_num,
                          &recording_state,
                          &mut recv_timeout_ms,
@@ -393,7 +393,7 @@ index 58291b7..923f847 100644
                      );
                  }
              }
-@@ -568,6 +557,7 @@ fn handle_payload_from_frame_acquire_thread(
+@@ -601,6 +590,7 @@ fn handle_payload_from_frame_acquire_thread(
      prev_frame_num: &mut Option<u32>,
      recording_state: &RecordingState,
      recv_timeout_ms: &mut u64,
@@ -401,7 +401,7 @@ index 58291b7..923f847 100644
  ) {
      match result {
          Ok(FrameSocketServerMessage {
-@@ -698,7 +688,7 @@ fn handle_payload_from_frame_acquire_thread(
+@@ -731,7 +721,7 @@ fn handle_payload_from_frame_acquire_thread(
                          };
                          if last_reprogram_over_1hr_ago {
                              let _ = fs::remove_file(reprogram_file);

@@ -1,0 +1,9 @@
+# Substrings of "module.function name" for states that fail in the image chroot, where there is no
+# systemd, dbus or hardware. One per line.
+
+# timedatectl needs systemd running. The image already has the timezone, which the dry run
+# of a highstate on a booted guest confirmed.
+timezone.system
+
+# localectl needs systemd running; the image already has en_NZ.UTF-8.
+locale.system

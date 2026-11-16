@@ -1,4 +1,4 @@
-# test.tc2 from salt-version-info, updated 2026-11-16T02:03:55.652Z.
+# test.tc2 from salt-version-info, updated 2026-11-16T21:46:25.820Z.
 # Regenerate with scripts/update-versions.sh.
 cacophony-config 1.36.0
 classifier-pipeline 0.0.76
@@ -8,6 +8,6 @@ management-interface 1.51.8
 modemd 1.18.1
 rpi-net-manager 0.8.0
 salt-updater 0.10.1
-tc2-agent 0.12.3
+tc2-agent 0.12.5
 tc2-hat-controller 0.36.1
 thermal-uploader 2.12.0

@@ -1,0 +1,47 @@
+#!/usr/bin/python3
+# Stands in for salt-call (the real one is diverted to salt-call.distrib, see
+# guest-setup.sh). There's no salt master, and the real salt-call takes ~38MB
+# and minutes to start on the guest: managementd and device-register run
+# `salt-call grains.setvals <json>` on every (re)register, and in the e2e tests
+# these piled up until the guest ran out of memory.
+#
+# grains.setvals is done here, writing /etc/salt/grains in the flat `key: value`
+# form go-utils saltutil.GetSaltGrains reads back. Anything else is a no-op.
+import json
+import os
+import sys
+
+GRAINS_FILE = "/etc/salt/grains"
+
+
+def read_grains():
+    grains = {}
+    try:
+        with open(GRAINS_FILE) as f:
+            for line in f:
+                key, sep, value = line.partition(":")
+                if sep:
+                    grains[key.strip()] = value.strip()
+    except FileNotFoundError:
+        pass
+    return grains
+
+
+def set_grains(values):
+    grains = read_grains()
+    grains.update({k: str(v) for k, v in values.items()})
+    tmp = GRAINS_FILE + ".tmp"
+    with open(tmp, "w") as f:
+        for key, value in grains.items():
+            f.write(f"{key}: {value}\n")
+    os.replace(tmp, GRAINS_FILE)
+    print("local:")
+    for key, value in values.items():
+        print(f"    {key}: {value}")
+
+
+args = [a for a in sys.argv[1:] if not a.startswith("-")]
+if len(args) == 2 and args[0] == "grains.setvals":
+    set_grains(json.loads(args[1]))
+else:
+    print("tc2-emu salt-call stub: ignoring", " ".join(sys.argv[1:]), file=sys.stderr)

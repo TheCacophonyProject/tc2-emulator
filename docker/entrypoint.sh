@@ -39,8 +39,8 @@ APPEND="root=PARTUUID=93147b3c-02 rootfstype=ext4 rootwait fsck.repair=yes conso
 [[ -n ${TC2_CONFIG_SYNC_DELAY:-} ]] && APPEND+=" tc2-emu.config-sync-delay=$TC2_CONFIG_SYNC_DELAY"
 [[ ${TC2_AUTOLOGIN:-} == 0 ]] && APPEND+=" tc2-emu.autologin=0"
 
-# The image configures eth0 statically as 192.168.1.2/24 with no gateway, so the
-# user-mode network uses that subnet. QEMU presents forwarded connections with
+# The guest configures eth0 statically as 192.168.1.2/24 with no gateway (the
+# tc2-emu-eth0 service), so the user-mode network uses that subnet. QEMU presents forwarded connections with
 # their real source address unless they come from loopback, and the guest can't
 # route replies off-subnet, so published ports are relayed via 127.0.0.1.
 # Guest connections to 192.168.1.1 arrive on the container's 127.0.0.1.

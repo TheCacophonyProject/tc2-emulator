@@ -1,0 +1,573 @@
+diff --git a/.github/workflows/goreleaser.yml b/.github/workflows/goreleaser.yml
+index b43c50d..7fafe00 100644
+--- a/.github/workflows/goreleaser.yml
++++ b/.github/workflows/goreleaser.yml
+@@ -79,12 +79,6 @@ jobs:
+       - name: Install typescript
+         run: make install-typescript
+ 
+-      - name: Install packr
+-        run: make install-packr
+-
+-      - name: Install packr
+-        run: go install github.com/gobuffalo/packr/v2/packr2@latest
+-
+       - name: Run GoReleaser
+         uses: goreleaser/goreleaser-action@v6
+         with:
+diff --git a/.goreleaser.yml b/.goreleaser.yml
+index 6db8b6c..5e15d02 100644
+--- a/.goreleaser.yml
++++ b/.goreleaser.yml
+@@ -21,9 +21,7 @@ builds:
+     ldflags: -s -w -X main.version={{.Version}}
+     hooks:
+       pre:
+-        - packr
+         - tsc
+-      post: packr clean
+ 
+ nfpms:
+   - vendor: The Cacophony Project
+diff --git a/Makefile b/Makefile
+index 768fb2e..8a24af1 100644
+--- a/Makefile
++++ b/Makefile
+@@ -1,14 +1,10 @@
+ .PHONY: build-arm
+-build-arm: install-packr
+-	GOOS=linux GOARCH=arm64 packr build -ldflags="-s -w" ./cmd/managementd
+-
+-.PHONY: install-packr
+-install-packr:
+-	go install github.com/gobuffalo/packr/packr@v1.30.1
++build-arm:
++	GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" ./cmd/managementd
+ 
+ .PHONY: build
+-build: install-packr install-typescript
+-	packr build -ldflags="-s -w" ./cmd/managementd
++build: install-typescript
++	go build -ldflags="-s -w" ./cmd/managementd
+ 
+ 
+ .PHONY: install-typescript
+@@ -19,10 +15,9 @@ install-typescript:
+ 	npx tsc
+ 
+ .PHONY: release
+-release: install-packr install-typescript
++release: install-typescript
+ 	curl -sL https://git.io/goreleaser | bash
+ 
+ .PHONY: clean
+ clean:
+-	packr clean
+ 	rm managementd
+diff --git a/README.md b/README.md
+index 84adb9e..e9e8c1e 100644
+--- a/README.md
++++ b/README.md
+@@ -4,26 +4,12 @@ This is a small web server which supports for management and
+ configuration of Cacophononator devices from the [The Cacophony
+ Project](https://cacophony.org.nz).
+ 
+-## Installing packr (will be done by make)
+-
+-This project uses the [packr](https://github.com/gobuffalo/packr) tool
+-to embed static resources (e.g. CSS, JS and image files) into the
+-resulting Go binary.
+-
+-To install packr from source, run:
+-```
+-go get -u github.com/gobuffalo/packr/packr
+-```
+-
+-Make sure $GOPATH/bin is in your $PATH.
+-
+-Alternatively download a stable [prebuilt
+-release](https://github.com/gobuffalo/packr/releases) of the packr
+-tool and install it into a directory in your $PATH.
+-
+ ## Building
+ 
+-Building will install packr for you. Make sure $GOPATH/bin is in your $PATH. 
++The static resources (e.g. CSS, JS and image files) and html templates are
++embedded into the resulting Go binary with `go:embed`, so the TypeScript must
++be compiled first (`make build` does this).
++
+ To build the management server for ARM (to run on a Raspberry Pi):
+ ```
+ make
+diff --git a/audiorecording.go b/audiorecording.go
+index 091efdf..08a9609 100644
+--- a/audiorecording.go
++++ b/audiorecording.go
+@@ -46,5 +46,5 @@ func AudioRecordingHandler(config *goconfig.Config, w http.ResponseWriter, r *ht
+ 		AudioRecording: &audioRecording,
+ 		ErrorMessage:   errorMessage(err),
+ 	}
+-	tmpl.ExecuteTemplate(w, "audiorecording.html", resp)
++	executeTemplate(w, "audiorecording.html", resp)
+ }
+diff --git a/cmd/managementd/main.go b/cmd/managementd/main.go
+index a48f33a..45ba18e 100644
+--- a/cmd/managementd/main.go
++++ b/cmd/managementd/main.go
+@@ -25,6 +25,7 @@ import (
+ 	"encoding/json"
+ 	"fmt"
+ 	"io"
++	"io/fs"
+ 	"net"
+ 	"net/http"
+ 	"os"
+@@ -35,7 +36,6 @@ import (
+ 
+ 	"github.com/godbus/dbus"
+ 
+-	"github.com/gobuffalo/packr"
+ 
+ 	"github.com/gorilla/mux"
+ 	"golang.org/x/net/websocket"
+@@ -217,11 +217,11 @@ func main() {
+ 	router := mux.NewRouter()
+ 
+ 	// Serve up static content.
+-	static := packr.NewBox("../../static")
+-	router.PathPrefix("/static/").Handler(http.StripPrefix("/static/", http.FileServer(static)))
++	static := managementinterface.StaticFS()
++	router.PathPrefix("/static/").Handler(http.StripPrefix("/static/", http.FileServer(http.FS(static))))
+ 	router.Handle("/ws", websocket.Handler(WebsocketServer))
+ 	router.HandleFunc("/favicon.ico", func(w http.ResponseWriter, r *http.Request) {
+-		favicon, err := static.Find("favicon.ico")
++		favicon, err := fs.ReadFile(static, "favicon.ico")
+ 		if err != nil {
+ 			http.Error(w, "Favicon not found", http.StatusNotFound)
+ 			return
+diff --git a/go.mod b/go.mod
+index fe72485..4be46e9 100644
+--- a/go.mod
++++ b/go.mod
+@@ -11,7 +11,6 @@ require (
+ 	github.com/TheCacophonyProject/lepton3 v0.0.0-20211005194419-22311c15d6ee
+ 	github.com/TheCacophonyProject/rtc-utils v1.2.0
+ 	github.com/TheCacophonyProject/salt-updater v0.8.2
+-	github.com/gobuffalo/packr v1.30.1
+ 	github.com/godbus/dbus v4.1.0+incompatible
+ 	github.com/gorilla/mux v1.8.0
+ 	github.com/nathan-osman/go-sunrise v1.0.0 // indirect
+@@ -34,7 +33,6 @@ require (
+ 	github.com/boltdb/bolt v1.3.1 // indirect
+ 	github.com/fsnotify/fsnotify v1.7.0 // indirect
+ 	github.com/gobuffalo/envy v1.10.2 // indirect
+-	github.com/gobuffalo/packd v1.0.2 // indirect
+ 	github.com/godbus/dbus/v5 v5.1.0 // indirect
+ 	github.com/gofrs/flock v0.12.1 // indirect
+ 	github.com/hashicorp/hcl v1.0.0 // indirect
+diff --git a/go.sum b/go.sum
+index ea4849f..5d4943d 100644
+--- a/go.sum
++++ b/go.sum
+@@ -71,13 +71,11 @@ github.com/client9/misspell v0.3.4/go.mod h1:qj6jICC3Q7zFZvVWo7KLAzC3yx5G7kyvSDk
+ github.com/codegangsta/cli v1.20.0/go.mod h1:/qJNoX69yVSKu5o4jLyXAENLRyk1uhi7zkbQ3slBdOA=
+ github.com/coreos/bbolt v1.3.2/go.mod h1:iRUV2dpdMOn7Bo10OQBFzIJO9kkE559Wcmn+qkEiiKk=
+ github.com/coreos/etcd v3.3.10+incompatible/go.mod h1:uF7uidLiAD3TWHmW31ZFd/JWoc32PjwdhPthX9715RE=
+-github.com/coreos/go-etcd v2.0.0+incompatible/go.mod h1:Jez6KQU2B/sWsbdaef3ED8NzMklzPG4d5KIOhIy30Tk=
+ github.com/coreos/go-semver v0.2.0/go.mod h1:nnelYz7RCh+5ahJtPPxZlU+153eP4D4r3EedlOD2RNk=
+ github.com/coreos/go-systemd v0.0.0-20190321100706-95778dfbb74e/go.mod h1:F5haX7vjVVG0kc13fIWeqUViNPyEJxv/OmvnBo0Yme4=
+ github.com/coreos/pkg v0.0.0-20180928190104-399ea9e2e55f/go.mod h1:E3G3o1h8I7cfcXa63jLwjI0eiQQMgzzUDFVpN/nH/eA=
+ github.com/corpix/uarand v0.1.1 h1:RMr1TWc9F4n5jiPDzFHtmaUXLKLNUFK0SgCLo4BhX/U=
+ github.com/corpix/uarand v0.1.1/go.mod h1:SFKZvkcRoLqVRFZ4u25xPmp6m9ktANfbpXZ7SJ0/FNU=
+-github.com/cpuguy83/go-md2man v1.0.10/go.mod h1:SmD6nW6nTyfqj6ABTjUi3V3JVMnlJmwcJI5acqYI6dE=
+ github.com/davecgh/go-spew v1.1.0/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
+ github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
+ github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc h1:U9qPSI2PIWSS1VwoXQT9A3Wy9MM3WgvqSxFWenqJduM=
+@@ -95,16 +93,8 @@ github.com/go-logfmt/logfmt v0.3.0/go.mod h1:Qt1PoO58o5twSAckw1HlFXLmHsOX5/0LbT9
+ github.com/go-logfmt/logfmt v0.4.0/go.mod h1:3RMwSq7FuexP4Kalkev3ejPJsZTpXXBr9+V4qmtdjCk=
+ github.com/go-stack/stack v1.8.0/go.mod h1:v0f6uXyyMGvRgIKkXu+yp6POWl0qKG85gN/melR3HDY=
+ github.com/gobuffalo/envy v1.6.5/go.mod h1:N+GkhhZ/93bGZc6ZKhJLP6+m+tCNPKwgSpH9kaifseQ=
+-github.com/gobuffalo/envy v1.7.0/go.mod h1:n7DRkBerg/aorDM8kbduw5dN3oXGswK5liaSCx4T5NI=
+ github.com/gobuffalo/envy v1.10.2 h1:EIi03p9c3yeuRCFPOKcSfajzkLb3hrRjEpHGI8I2Wo4=
+ github.com/gobuffalo/envy v1.10.2/go.mod h1:qGAGwdvDsaEtPhfBzb3o0SfDea8ByGn9j8bKmVft9z8=
+-github.com/gobuffalo/logger v1.0.0/go.mod h1:2zbswyIUa45I+c+FLXuWl9zSWEiVuthsk8ze5s8JvPs=
+-github.com/gobuffalo/packd v0.3.0/go.mod h1:zC7QkmNkYVGKPw4tHpBQ+ml7W/3tIebgeo1b36chA3Q=
+-github.com/gobuffalo/packd v1.0.2 h1:Yg523YqnOxGIWCp69W12yYBKsoChwI7mtu6ceM9Bwfw=
+-github.com/gobuffalo/packd v1.0.2/go.mod h1:sUc61tDqGMXON80zpKGp92lDb86Km28jfvX7IAyxFT8=
+-github.com/gobuffalo/packr v1.30.1 h1:hu1fuVR3fXEZR7rXNW3h8rqSML8EVAf6KNm0NKO/wKg=
+-github.com/gobuffalo/packr v1.30.1/go.mod h1:ljMyFO2EcrnzsHsN99cvbq055Y9OhRrIaviy289eRuk=
+-github.com/gobuffalo/packr/v2 v2.5.1/go.mod h1:8f9c96ITobJlPzI44jj+4tHnEKNt0xXWSVlXRN9X1Iw=
+ github.com/godbus/dbus v0.0.0-20181101234600-2ff6f7ffd60f/go.mod h1:/YcGZj5zSblfDWMMoOzV4fas9FZnQYTkDnsGvmh2Grw=
+ github.com/godbus/dbus v4.1.0+incompatible h1:WqqLRTsQic3apZUK9qC5sGNfXthmPXzUZ7nQPrNITa4=
+ github.com/godbus/dbus v4.1.0+incompatible/go.mod h1:/YcGZj5zSblfDWMMoOzV4fas9FZnQYTkDnsGvmh2Grw=
+@@ -134,7 +124,6 @@ github.com/hashicorp/hcl v1.0.0 h1:0Anlzjpi4vEasTeNFn2mLJgTSwt0+6sfsiTG8qcWGx4=
+ github.com/hashicorp/hcl v1.0.0/go.mod h1:E5yfLk+7swimpb2L/Alb/PJmXilQ/rhwaUYs4T20WEQ=
+ github.com/icrowley/fake v0.0.0-20180203215853-4178557ae428 h1:Mo9W14pwbO9VfRe+ygqZ8dFbPpoIK1HFrG/zjTuQ+nc=
+ github.com/icrowley/fake v0.0.0-20180203215853-4178557ae428/go.mod h1:uhpZMVGznybq1itEKXj6RYw9I71qK4kH+OGMjRC4KEo=
+-github.com/inconshreveable/mousetrap v1.0.0/go.mod h1:PxqpIevigyE2G7u3NXJIT2ANytuPF1OarO4DADm73n8=
+ github.com/joho/godotenv v1.3.0/go.mod h1:7hK45KPybAkOC6peb+G5yklZfMxEjkZhHbwpqxOKXbg=
+ github.com/joho/godotenv v1.4.0/go.mod h1:f4LDr5Voq0i2e/R5DDNOoa2zzDfwtkZa6DnEwAbqwq4=
+ github.com/joho/godotenv v1.5.1 h1:7eLL/+HRGLY0ldzfGMeQkb7vMd0as4CfYvUVzLqw0N0=
+@@ -142,11 +131,9 @@ github.com/joho/godotenv v1.5.1/go.mod h1:f4LDr5Voq0i2e/R5DDNOoa2zzDfwtkZa6DnEwA
+ github.com/jonboulle/clockwork v0.1.0/go.mod h1:Ii8DK3G1RaLaWxj9trq07+26W01tbo22gdxWY5EU2bo=
+ github.com/juju/ratelimit v1.0.1/go.mod h1:qapgC/Gy+xNh9UxzV13HGGl/6UXNN+ct+vwSgWNm/qk=
+ github.com/julienschmidt/httprouter v1.2.0/go.mod h1:SYymIcj16QtmaHHD7aYtjjsJG7VTCxuUUipMqKk8s4w=
+-github.com/karrick/godirwalk v1.10.12/go.mod h1:RoGL9dQei4vP9ilrpETWE8CLOZ1kiN0LhBygSwrAsHA=
+ github.com/kisielk/errcheck v1.1.0/go.mod h1:EZBBE59ingxPouuu3KfxchcWSUPOHkagtvWXihfKN4Q=
+ github.com/kisielk/gotool v1.0.0/go.mod h1:XhKaO+MFFWcvkIS/tQcRk01m1F5IRFswLeQ+oQHNcck=
+ github.com/konsorten/go-windows-terminal-sequences v1.0.1/go.mod h1:T0+1ngSBFLxvqU3pZ+m/2kptfBszLMUkC4ZK/EgS/cQ=
+-github.com/konsorten/go-windows-terminal-sequences v1.0.2/go.mod h1:T0+1ngSBFLxvqU3pZ+m/2kptfBszLMUkC4ZK/EgS/cQ=
+ github.com/kr/fs v0.1.0/go.mod h1:FFnZGqtBN9Gxj7eW1uZ42v5BccTP0vu6NEaFoC2HwRg=
+ github.com/kr/logfmt v0.0.0-20140226030751-b84e30acd515/go.mod h1:+0opPa2QZZtGFBFZlji/RkVcI2GknAs/DXo4wKdlNEc=
+ github.com/kr/pretty v0.1.0/go.mod h1:dAy3ld7l9f0ibDNOQOHHMYYIIbhfbHSm3C4ZsoJORNo=
+@@ -199,18 +186,14 @@ github.com/prometheus/tsdb v0.7.1/go.mod h1:qhTCs0VvXwvX/y3TZrWD7rabWM+ijKTux40T
+ github.com/rjeczalik/notify v0.9.2/go.mod h1:aErll2f0sUX9PXZnVNyeiObbmTlk5jnMoCa4QEjJeqM=
+ github.com/rjeczalik/notify v0.9.3/go.mod h1:gF3zSOrafR9DQEWSE8TjfI9NkooDxbyT4UgRGKZA0lc=
+ github.com/rogpeppe/fastuuid v0.0.0-20150106093220-6724a57986af/go.mod h1:XWv6SoW27p1b0cqNHllgS5HIMJraePCO15w5zCzIWYg=
+-github.com/rogpeppe/go-internal v1.1.0/go.mod h1:M8bDsm7K2OlrFYOpmOWEs/qY81heoFRclV5y23lUDJ4=
+-github.com/rogpeppe/go-internal v1.3.0/go.mod h1:M8bDsm7K2OlrFYOpmOWEs/qY81heoFRclV5y23lUDJ4=
+ github.com/rogpeppe/go-internal v1.9.0/go.mod h1:WtVeX8xhTBvf0smdhujwtBcq4Qrzq/fJaraNFVN+nFs=
+ github.com/rogpeppe/go-internal v1.16.0 h1:O9DK+vNMDVGLr2BeZqmpLeMjiMNkuXfcqntWbZV6S5g=
+ github.com/rogpeppe/go-internal v1.16.0/go.mod h1:DrUVZyrJU+txYW5/1kwtXQSMFio52ZOxX7yM1VHvnxs=
+-github.com/russross/blackfriday v1.5.2/go.mod h1:JO/DiYxRf+HjHt06OyowR9PTA263kcR/rfWxYHBV53g=
+ github.com/sagikazarmark/locafero v0.6.0 h1:ON7AQg37yzcRPU69mt7gwhFEBwxI6P9T4Qu3N51bwOk=
+ github.com/sagikazarmark/locafero v0.6.0/go.mod h1:77OmuIc6VTraTXKXIs/uvUxKGUXjE1GbemJYHqdNjX0=
+ github.com/sagikazarmark/slog-shim v0.1.0 h1:diDBnUNK9N/354PgrxMywXnAwEr1QZcOr6gto+ugjYE=
+ github.com/sagikazarmark/slog-shim v0.1.0/go.mod h1:SrcSrq8aKtyuqEI1uvTDTK1arOWRIczQRv+GVI1AkeQ=
+ github.com/sirupsen/logrus v1.2.0/go.mod h1:LxeOpSwHxABJmUn/MG1IvRgCAasNZTLOkJPxbbu5VWo=
+-github.com/sirupsen/logrus v1.4.2/go.mod h1:tLMulIdttU9McNUspp0xgXVQah82FyeX6MwdIuYE2rE=
+ github.com/sirupsen/logrus v1.9.4 h1:TsZE7l11zFCLZnZ+teH4Umoq5BhEIfIzfRDZ1Uzql2w=
+ github.com/sirupsen/logrus v1.9.4/go.mod h1:ftWc9WdOfJ0a92nsE2jF5u5ZwH8Bv2zdeOC42RjbV2g=
+ github.com/soheilhy/cmux v0.1.4/go.mod h1:IM3LyeVVIOuxMH7sFAkER9+bJ4dT7Ms6E4xg4kGIyLM=
+@@ -225,14 +208,12 @@ github.com/spf13/afero v1.11.0/go.mod h1:GH9Y3pIexgf1MTIWtNGyogA5MwRIDXGUr+hbWNo
+ github.com/spf13/cast v1.3.0/go.mod h1:Qx5cxh0v+4UWYiBimWS+eyWzqEqokIECu5etghLkUJE=
+ github.com/spf13/cast v1.7.0 h1:ntdiHjuueXFgm5nzDRdOS4yfT43P5Fnud6DH50rz/7w=
+ github.com/spf13/cast v1.7.0/go.mod h1:ancEpBxwJDODSW/UG4rDrAqiKolqNNh2DX3mk86cAdo=
+-github.com/spf13/cobra v0.0.5/go.mod h1:3K3wKZymM7VvHMDS9+Akkh4K60UwM26emMESw8tLCHU=
+ github.com/spf13/jwalterweatherman v1.0.0/go.mod h1:cQK4TGJAtQXfYWX+Ddv3mKDzgVb68N+wFjFa4jdeBTo=
+ github.com/spf13/jwalterweatherman v1.1.0/go.mod h1:aNWZUN0dPAAO/Ljvb5BEdw96iTZ0EXowPYD95IqWIGo=
+ github.com/spf13/pflag v1.0.3/go.mod h1:DYY7MBk1bdzusC3SYhjObp+wFpr4gzcvqqNjLnInEg4=
+ github.com/spf13/pflag v1.0.5/go.mod h1:McXfInJRrz4CZXVZOBLb0bTZqETkiAhM9Iw0y3An2Bg=
+ github.com/spf13/pflag v1.0.10 h1:4EBh2KAYBwaONj6b2Ye1GiHfwjqyROoF4RwYO+vPwFk=
+ github.com/spf13/pflag v1.0.10/go.mod h1:McXfInJRrz4CZXVZOBLb0bTZqETkiAhM9Iw0y3An2Bg=
+-github.com/spf13/viper v1.3.2/go.mod h1:ZiWeW+zYFKm7srdB9IoDzzZXaJaI5eL9QjNiN/DMA2s=
+ github.com/spf13/viper v1.4.0/go.mod h1:PTJ7Z/lr49W6bUbkmS1V3by4uWynFiR9p7+dSq/yZzE=
+ github.com/spf13/viper v1.5.0/go.mod h1:AkYRkVJF8TkSG/xet6PzXX+l39KhhXa2pdqVSxnTcn4=
+ github.com/spf13/viper v1.19.0 h1:RWq5SEjt8o25SROyN3z2OrDB9l7RPd3lwTWU8EcEdcI=
+@@ -254,7 +235,6 @@ github.com/subosito/gotenv v1.6.0 h1:9NlTDc1FTs4qu0DDq7AEtTPNw6SVm7uBMsUCUjABIf8
+ github.com/subosito/gotenv v1.6.0/go.mod h1:Dk4QP5c2W3ibzajGcXpNraDfq2IrhjMIvMSWPKKo0FU=
+ github.com/tmc/grpc-websocket-proxy v0.0.0-20190109142713-0ad062ec5ee5/go.mod h1:ncp9v5uamzpCO7NfCPTXjqaC+bZgJeR0sMTm6dMHP7U=
+ github.com/ugorji/go v1.1.4/go.mod h1:uQMGLiO92mf5W77hV/PUCpI3pbzQx3CRekS0kk+RGrc=
+-github.com/ugorji/go/codec v0.0.0-20181204163529-d75b2dcb6bc8/go.mod h1:VFNgLljTbGfSG7qAOspJ7OScBnGdDN/yBr0sguwnwf0=
+ github.com/wawandco/fako v0.0.0-20180828010250-c36a0bc97398 h1:EbkGA9rhf8LaR2TuInhnVkkN87zhvXtK7XXvDO/VIBQ=
+ github.com/wawandco/fako v0.0.0-20180828010250-c36a0bc97398/go.mod h1:WXCdTp/KbzpF7oX1hTO2l8AnzCBAlipPWkS+p0/X/l4=
+ github.com/xiang90/probing v0.0.0-20190116061207-43a291ad63a2/go.mod h1:UETIi67q53MR2AWcXfiuqkDkRtnGDLqkBTpCHuJHxtU=
+@@ -266,9 +246,7 @@ go.uber.org/multierr v1.11.0 h1:blXXJkSxSSfBVBlC76pxqeO+LN3aDfLQo+309xJstO0=
+ go.uber.org/multierr v1.11.0/go.mod h1:20+QtiLqy0Nd6FdQB9TLXag12DsQkrbs3htMFfDN80Y=
+ go.uber.org/zap v1.10.0/go.mod h1:vwi/ZaCAaUcBkycHslxD9B2zi4UTXhF60s6SWpuDF0Q=
+ golang.org/x/crypto v0.0.0-20180904163835-0709b304e793/go.mod h1:6SG95UA2DQfeDnfUPMdvaQW0Q7yPrPDi9nlGo2tz2b4=
+-golang.org/x/crypto v0.0.0-20181203042331-505ab145d0a9/go.mod h1:6SG95UA2DQfeDnfUPMdvaQW0Q7yPrPDi9nlGo2tz2b4=
+ golang.org/x/crypto v0.0.0-20190308221718-c2843e01d9a2/go.mod h1:djNgcEr1/C05ACkg1iLfiJU5Ep61QUkGW8qpdssI0+w=
+-golang.org/x/crypto v0.0.0-20190621222207-cc06ce4a13d4/go.mod h1:yigFU9vqHzYiE8UmvKecakEJjdnWj3jj499lnFckfCI=
+ golang.org/x/crypto v0.0.0-20190820162420-60c769a6c586/go.mod h1:yigFU9vqHzYiE8UmvKecakEJjdnWj3jj499lnFckfCI=
+ golang.org/x/crypto v0.0.0-20200622213623-75b288015ac9/go.mod h1:LzIPMQfyMNhhGPhUkYOs5KpL4U8rLKemX1yGLhDgUto=
+ golang.org/x/exp v0.0.0-20240909161429-701f63a606c0 h1:e66Fs6Z+fZTbFBAxKfP3PALWBtpfqks2bwGcexMxgtk=
+@@ -294,18 +272,14 @@ golang.org/x/oauth2 v0.0.0-20180821212333-d2e6202438be/go.mod h1:N/0e6XlmueqKjAG
+ golang.org/x/sync v0.0.0-20180314180146-1d60e4601c6f/go.mod h1:RxMgew5VJxzue5/jJTE5uejpjVlOe/izrB70Jof72aM=
+ golang.org/x/sync v0.0.0-20181108010431-42b317875d0f/go.mod h1:RxMgew5VJxzue5/jJTE5uejpjVlOe/izrB70Jof72aM=
+ golang.org/x/sync v0.0.0-20181221193216-37e7f081c4d4/go.mod h1:RxMgew5VJxzue5/jJTE5uejpjVlOe/izrB70Jof72aM=
+-golang.org/x/sync v0.0.0-20190423024810-112230192c58/go.mod h1:RxMgew5VJxzue5/jJTE5uejpjVlOe/izrB70Jof72aM=
+ golang.org/x/sys v0.0.0-20180830151530-49385e6e1522/go.mod h1:STP8DvDyc/dI5b8T5hshtkjS+E42TnysNCUPdjciGhY=
+ golang.org/x/sys v0.0.0-20180905080454-ebe1bf3edb33/go.mod h1:STP8DvDyc/dI5b8T5hshtkjS+E42TnysNCUPdjciGhY=
+ golang.org/x/sys v0.0.0-20180926160741-c2ed4eda69e7/go.mod h1:STP8DvDyc/dI5b8T5hshtkjS+E42TnysNCUPdjciGhY=
+ golang.org/x/sys v0.0.0-20181107165924-66b7b1311ac8/go.mod h1:STP8DvDyc/dI5b8T5hshtkjS+E42TnysNCUPdjciGhY=
+ golang.org/x/sys v0.0.0-20181116152217-5ac8a444bdc5/go.mod h1:STP8DvDyc/dI5b8T5hshtkjS+E42TnysNCUPdjciGhY=
+-golang.org/x/sys v0.0.0-20181205085412-a5c9d58dba9a/go.mod h1:STP8DvDyc/dI5b8T5hshtkjS+E42TnysNCUPdjciGhY=
+ golang.org/x/sys v0.0.0-20190215142949-d0b11bdaac8a/go.mod h1:STP8DvDyc/dI5b8T5hshtkjS+E42TnysNCUPdjciGhY=
+ golang.org/x/sys v0.0.0-20190318195719-6c81ef8f67ca/go.mod h1:h1NjWce9XRLGQEsW7wpKNCjG9DtNlClVuFLEZdDNbEs=
+ golang.org/x/sys v0.0.0-20190412213103-97732733099d/go.mod h1:h1NjWce9XRLGQEsW7wpKNCjG9DtNlClVuFLEZdDNbEs=
+-golang.org/x/sys v0.0.0-20190422165155-953cdadca894/go.mod h1:h1NjWce9XRLGQEsW7wpKNCjG9DtNlClVuFLEZdDNbEs=
+-golang.org/x/sys v0.0.0-20190515120540-06a5c4944438/go.mod h1:h1NjWce9XRLGQEsW7wpKNCjG9DtNlClVuFLEZdDNbEs=
+ golang.org/x/sys v0.0.0-20190912141932-bc967efca4b8/go.mod h1:h1NjWce9XRLGQEsW7wpKNCjG9DtNlClVuFLEZdDNbEs=
+ golang.org/x/sys v0.0.0-20200323222414-85ca7c5b95cd/go.mod h1:h1NjWce9XRLGQEsW7wpKNCjG9DtNlClVuFLEZdDNbEs=
+ golang.org/x/sys v0.0.0-20201119102817-f84b799fce68/go.mod h1:h1NjWce9XRLGQEsW7wpKNCjG9DtNlClVuFLEZdDNbEs=
+@@ -324,7 +298,6 @@ golang.org/x/tools v0.0.0-20180221164845-07fd8470d635/go.mod h1:n7NCudcB/nEzxVGm
+ golang.org/x/tools v0.0.0-20180917221912-90fa682c2a6e/go.mod h1:n7NCudcB/nEzxVGmLbDWY5pfWTLqBcC2KZ6jyYvM4mQ=
+ golang.org/x/tools v0.0.0-20190114222345-bf090417da8b/go.mod h1:n7NCudcB/nEzxVGmLbDWY5pfWTLqBcC2KZ6jyYvM4mQ=
+ golang.org/x/tools v0.0.0-20190311212946-11955173bddd/go.mod h1:LCzVGOaR6xXOjkQ3onu1FJEFr0SW1gC7cKk1uF8kGRs=
+-golang.org/x/tools v0.0.0-20190624180213-70d37148ca0c/go.mod h1:/rFqwRUd4F7ZHNgwSSTFct+R/Kf4OFW1sUzUTQQTgfc=
+ google.golang.org/appengine v1.1.0/go.mod h1:EbEs0AVv82hx2wNQdGPgUI5lhzA/G0D9YwlJXL52JkM=
+ google.golang.org/genproto v0.0.0-20180817151627-c66870c02cf8/go.mod h1:JiN7NxoALGmiZfu7CAH4rXhgtRTLTxftemlI0sWmxmc=
+ google.golang.org/grpc v1.19.0/go.mod h1:mqu4LbDTu4XGKhr4mRzUsmM4RtVoemTSY81AxZiDr8c=
+@@ -336,7 +309,6 @@ gopkg.in/check.v1 v1.0.0-20190902080502-41f04d3bba15/go.mod h1:Co6ibVJAznAaIkqp8
+ gopkg.in/check.v1 v1.0.0-20200902074654-038fdea0a05b/go.mod h1:Co6ibVJAznAaIkqp8huTwlJQCZ016jof/cbN4VW5Yz0=
+ gopkg.in/check.v1 v1.0.0-20201130134442-10cb98267c6c h1:Hei/4ADfdWqJk1ZMxUNpqntNwaWcugrBjAiHlqqRiVk=
+ gopkg.in/check.v1 v1.0.0-20201130134442-10cb98267c6c/go.mod h1:JHkPIbrfpd72SG/EVd6muEfDQjcINNoR0C8j2r3qZ4Q=
+-gopkg.in/errgo.v2 v2.1.0/go.mod h1:hNsd1EY+bozCKY1Ytp96fpM3vjJbqLJn88ws8XvfDNI=
+ gopkg.in/ini.v1 v1.67.0 h1:Dgnx+6+nfE+IfzjUEISNeydPJh9AXNNsWbGP9KzCsOA=
+ gopkg.in/ini.v1 v1.67.0/go.mod h1:pNLf8WUiyNEtQjuu5G5vTm06TEv9tsIgeAvK8hOrP4k=
+ gopkg.in/resty.v1 v1.12.0/go.mod h1:mDo4pnntr5jdWRML875a/NmxYqAlA73dVijT2AXvQQo=
+diff --git a/location.go b/location.go
+index 351cac8..705465d 100644
+--- a/location.go
++++ b/location.go
+@@ -46,5 +46,5 @@ func LocationHandler(config *goconfig.Config, w http.ResponseWriter, r *http.Req
+ 		Location:     &location,
+ 		ErrorMessage: errorMessage(err),
+ 	}
+-	tmpl.ExecuteTemplate(w, "location.html", resp)
++	executeTemplate(w, "location.html", resp)
+ }
+diff --git a/management-interface.go b/management-interface.go
+index 764d8f3..d9d23c3 100644
+--- a/management-interface.go
++++ b/management-interface.go
+@@ -19,9 +19,11 @@ along with this program. If not, see <http://www.gnu.org/licenses/>.
+ package managementinterface
+ 
+ import (
++	"embed"
+ 	"encoding/json"
+ 	"html/template"
+ 	"io"
++	"io/fs"
+ 	"net"
+ 	"net/http"
+ 	"os"
+@@ -30,6 +32,7 @@ import (
+ 	"slices"
+ 	"strconv"
+ 	"strings"
++	"sync"
+ 	"time"
+ 
+ 	versionreporter "github.com/TheCacophonyProject/event-reporter/v3/version-reporter"
+@@ -42,32 +45,74 @@ import (
+ 	"golang.org/x/text/language"
+ 
+ 	"github.com/TheCacophonyProject/go-utils/logging"
+-	"github.com/gobuffalo/packr"
+ 	"github.com/gorilla/mux"
+ )
+ 
+ var log = logging.NewLogger("info")
+ 
+-// Using a packr box means the html files are bundled up in the binary application.
+-var templateBox = packr.NewBox("./html")
+-
+-// tmpl is our pointer to our parsed templates.
+-var tmpl *template.Template
+-
+-// This does some initialisation.  It parses our html templates up front and
+-// finds the location where this executable was started.
+-func init() {
+-	// The name of the device we are running this executable on.
+-	deviceName := getDeviceName()
+-	tmpl = template.New("")
+-	tmpl.Funcs(template.FuncMap{"DeviceName": func() string { return deviceName }})
+-	for _, name := range templateBox.List() {
+-		t := tmpl.New(name)
+-		s, err := templateBox.FindString(name)
+-		if err != nil {
+-			log.Fatal(err)
++// The html templates and static files are embedded in the binary. Embedding
++// costs nothing at startup: the files are read straight out of the binary when
++// they're needed, instead of being unpacked into memory whenever managementd starts.
++//
++//go:embed html
++var htmlFiles embed.FS
++
++//go:embed static
++var staticFiles embed.FS
++
++// StaticFS returns the embedded static files, with static/ as the root.
++func StaticFS() fs.FS {
++	static, err := fs.Sub(staticFiles, "static")
++	if err != nil {
++		panic(err)
++	}
++	return static
++}
++
++var (
++	// tmpl is our pointer to our parsed templates, see templates().
++	tmpl     *template.Template
++	tmplErr  error
++	tmplOnce sync.Once
++)
++
++// templates parses the html templates the first time they're needed. Most of the
++// time managementd runs with nobody looking at its web interface, so this isn't
++// done at startup. It also finds the device name that's inserted into the templates.
++func templates() (*template.Template, error) {
++	tmplOnce.Do(func() {
++		// The name of the device we are running this executable on.
++		deviceName := getDeviceName()
++		t := template.New("")
++		t.Funcs(template.FuncMap{"DeviceName": func() string { return deviceName }})
++		tmplErr = fs.WalkDir(htmlFiles, "html", func(path string, d fs.DirEntry, err error) error {
++			if err != nil || d.IsDir() {
++				return err
++			}
++			s, err := htmlFiles.ReadFile(path)
++			if err != nil {
++				return err
++			}
++			_, err = t.New(strings.TrimPrefix(path, "html/")).Parse(string(s))
++			return err
++		})
++		if tmplErr == nil {
++			tmpl = t
+ 		}
+-		template.Must(t.Parse(s))
++	})
++	return tmpl, tmplErr
++}
++
++// executeTemplate writes the named template to w.
++func executeTemplate(w http.ResponseWriter, name string, data any) {
++	t, err := templates()
++	if err != nil {
++		log.Printf("failed to parse html templates: %v", err)
++		http.Error(w, "Internal server error", http.StatusInternalServerError)
++		return
++	}
++	if err := t.ExecuteTemplate(w, name, data); err != nil {
++		log.Printf("failed to execute template %s: %v", name, err)
+ 	}
+ }
+ 
+@@ -247,17 +292,17 @@ func DiskMemoryHandler(w http.ResponseWriter, r *http.Request) {
+ 	}
+ 
+ 	// Execute the actual template.
+-	tmpl.ExecuteTemplate(w, "disk-memory.html", outputStruct)
++	executeTemplate(w, "disk-memory.html", outputStruct)
+ }
+ 
+ // IndexHandler is the root handler.
+ func IndexHandler(w http.ResponseWriter, r *http.Request) {
+-	tmpl.ExecuteTemplate(w, "index.html", nil)
++	executeTemplate(w, "index.html", nil)
+ }
+ 
+ // AdvancedMenuHandler is a screen to more advanced settings.
+ func AdvancedMenuHandler(w http.ResponseWriter, r *http.Request) {
+-	tmpl.ExecuteTemplate(w, "advanced.html", nil)
++	executeTemplate(w, "advanced.html", nil)
+ }
+ 
+ // Get the IP address for a given interface.  There can be 0, 1 or 2 (e.g. IPv4 and IPv6)
+@@ -319,7 +364,7 @@ func NetworkHandler(w http.ResponseWriter, r *http.Request) {
+ 	}
+ 
+ 	// Need to respond to individual requests to test if a network status is up or down.
+-	tmpl.ExecuteTemplate(w, "network.html", state)
++	executeTemplate(w, "network.html", state)
+ }
+ 
+ type wifiNetwork struct {
+@@ -363,7 +408,7 @@ func WifiNetworkHandler(w http.ResponseWriter, r *http.Request) {
+ 		wifiProps.Error = "Wifi Error: " + err.Error()
+ 	}
+ 
+-	tmpl.ExecuteTemplate(w, "wifi-networks.html", wifiProps)
++	executeTemplate(w, "wifi-networks.html", wifiProps)
+ }
+ 
+ // AboutHandlerGen is a wrapper for the AboutHandler function.
+@@ -410,7 +455,7 @@ func AboutHandler(w http.ResponseWriter, r *http.Request, conf *goconfig.Config)
+ 	packages, err := versionreporter.GetInstalledPackages()
+ 	if err != nil {
+ 		resp.ErrorMessage = errorMessage(err)
+-		tmpl.ExecuteTemplate(w, "about.html", resp)
++		executeTemplate(w, "about.html", resp)
+ 	}
+ 	log.Printf("Packages are %v", packages)
+ 	keys := make([]string, len(packages))
+@@ -428,7 +473,7 @@ func AboutHandler(w http.ResponseWriter, r *http.Request, conf *goconfig.Config)
+ 	}
+ 	resp.PackageDataRows = data
+ 
+-	tmpl.ExecuteTemplate(w, "about.html", resp)
++	executeTemplate(w, "about.html", resp)
+ }
+ 
+ // CheckInterfaceHandler checks an interface to see if it is up or down.
+@@ -462,11 +507,11 @@ func CheckInterfaceHandler(w http.ResponseWriter, r *http.Request) {
+ 
+ // CameraHandler will show a frame from the camera to help with positioning
+ func CameraHandler(w http.ResponseWriter, r *http.Request) {
+-	tmpl.ExecuteTemplate(w, "camera.html", nil)
++	executeTemplate(w, "camera.html", nil)
+ }
+ 
+ func LowPowerThermalRecordingHandler(w http.ResponseWriter, r *http.Request) {
+-	tmpl.ExecuteTemplate(w, "low-power-thermal-recording.html", nil)
++	executeTemplate(w, "low-power-thermal-recording.html", nil)
+ }
+ 
+ // CameraSnapshot - Still image from Lepton camera
+@@ -475,29 +520,29 @@ func CameraSnapshot(w http.ResponseWriter, r *http.Request) {
+ }
+ 
+ func TimeHandler(w http.ResponseWriter, r *http.Request) {
+-	tmpl.ExecuteTemplate(w, "clock.html", nil)
++	executeTemplate(w, "clock.html", nil)
+ }
+ 
+ // Rename page to change device name and group
+ func Rename(w http.ResponseWriter, r *http.Request) {
+-	tmpl.ExecuteTemplate(w, "rename.html", nil)
++	executeTemplate(w, "rename.html", nil)
+ }
+ 
+ // Config page to change devices config
+ func Config(w http.ResponseWriter, r *http.Request) {
+-	tmpl.ExecuteTemplate(w, "config.html", nil)
++	executeTemplate(w, "config.html", nil)
+ }
+ 
+ func Modem(w http.ResponseWriter, r *http.Request) {
+-	tmpl.ExecuteTemplate(w, "modem.html", nil)
++	executeTemplate(w, "modem.html", nil)
+ }
+ 
+ func Trap(w http.ResponseWriter, r *http.Request) {
+-	tmpl.ExecuteTemplate(w, "trap.html", nil)
++	executeTemplate(w, "trap.html", nil)
+ }
+ 
+ func Battery(w http.ResponseWriter, r *http.Request) {
+-	tmpl.ExecuteTemplate(w, "battery.html", nil)
++	executeTemplate(w, "battery.html", nil)
+ }
+ 
+ func DownloadTemperatureCSV(w http.ResponseWriter, r *http.Request) {
+@@ -576,7 +621,7 @@ func Audiobait(w http.ResponseWriter, r *http.Request) {
+ 	playSchedule, err := playlist.LoadScheduleFromDisk(goconfig.DefaultAudioBait().Dir)
+ 	if err != nil {
+ 		log.Println(err)
+-		tmpl.ExecuteTemplate(w, "audiobait.html", audiobaitResponse{
++		executeTemplate(w, "audiobait.html", audiobaitResponse{
+ 			ErrorMessage: err.Error(),
+ 		})
+ 		return
+@@ -584,7 +629,7 @@ func Audiobait(w http.ResponseWriter, r *http.Request) {
+ 	library, err := audiofilelibrary.OpenLibrary(goconfig.DefaultAudioBait().Dir)
+ 	if err != nil {
+ 		log.Println(err)
+-		tmpl.ExecuteTemplate(w, "audiobait.html", audiobaitResponse{
++		executeTemplate(w, "audiobait.html", audiobaitResponse{
+ 			ErrorMessage: err.Error(),
+ 		})
+ 		return
+@@ -631,7 +676,7 @@ func Audiobait(w http.ResponseWriter, r *http.Request) {
+ 		},
+ 		Running: true,
+ 	}
+-	tmpl.ExecuteTemplate(w, "audiobait.html", ar)
++	executeTemplate(w, "audiobait.html", ar)
+ }
+ 
+ func errorMessage(err error) string {

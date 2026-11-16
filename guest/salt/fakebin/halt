@@ -1,0 +1,4 @@
+#!/bin/sh
+# Not in the image's chroot.
+echo "tc2-emu: halt $*" >&2
+exit 0

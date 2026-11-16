@@ -1,0 +1,238 @@
+diff --git a/.goreleaser.yml b/.goreleaser.yml
+index 5e15d02..735f185 100644
+--- a/.goreleaser.yml
++++ b/.goreleaser.yml
+@@ -38,6 +38,8 @@ nfpms:
+         dst: /etc/avahi/services/managementd.service
+       - src: _release/managementd.service
+         dst: /etc/systemd/system/managementd.service
++      - src: _release/managementd.socket
++        dst: /etc/systemd/system/managementd.socket
+     scripts:
+       postinstall: "_release/postinstall.sh"
+ 
+diff --git a/_release/managementd.service b/_release/managementd.service
+index 6a9b1ed..1231c06 100644
+--- a/_release/managementd.service
++++ b/_release/managementd.service
+@@ -1,3 +1,5 @@
++# Started by managementd.socket when something connects to port 80, and exits
++# again when it has been idle for a while.
+ [Unit]
+ Description=Cacophonator management interface
+ After=network.target
+@@ -7,6 +9,3 @@ ConditionPathExists=/etc/salt/minion_id
+ ExecStart=/usr/bin/managementd
+ Restart=on-failure
+ RestartSec=5s
+-
+-[Install]
+-WantedBy=multi-user.target
+diff --git a/_release/managementd.socket b/_release/managementd.socket
+new file mode 100644
+index 0000000..7a285a3
+--- /dev/null
++++ b/_release/managementd.socket
+@@ -0,0 +1,9 @@
++[Unit]
++Description=Cacophonator management interface socket
++ConditionPathExists=/etc/salt/minion_id
++
++[Socket]
++ListenStream=80
++
++[Install]
++WantedBy=multi-user.target
+diff --git a/_release/postinstall.sh b/_release/postinstall.sh
+index 402ad57..917fd70 100644
+--- a/_release/postinstall.sh
++++ b/_release/postinstall.sh
+@@ -4,10 +4,20 @@ set -e
+ # --- Configuration ---
+ # Define all services and what systemd action should be taken.
+ # Format is "service.name:<none|restart|start>"
++# managementd is started by managementd.socket when something connects to it.
+ SERVICES_TO_MANAGE=(
+-    "managementd.service:start"
++    "managementd.socket:start"
+ )
+ 
++# Earlier versions started managementd.service at boot. That's the socket's job
++# now, so stop that. If managementd is running (an upgrade) it still holds the
++# port, so the socket can't be started yet: it takes over the next time
++# managementd restarts, which salt does after an update.
++systemctl disable managementd.service 2>/dev/null || true
++if systemctl is-active --quiet managementd.service; then
++    SERVICES_TO_MANAGE=("managementd.socket:none")
++fi
++
+ # Extract just the service names for the check
+ service_files=()
+ for config in "${SERVICES_TO_MANAGE[@]}"; do
+diff --git a/cmd/managementd/main.go b/cmd/managementd/main.go
+index 45ba18e..5044954 100644
+--- a/cmd/managementd/main.go
++++ b/cmd/managementd/main.go
+@@ -21,8 +21,10 @@ package main
+ import (
+ 	"bufio"
+ 	"bytes"
++	"context"
+ 	"encoding/binary"
+ 	"encoding/json"
++	"errors"
+ 	"fmt"
+ 	"io"
+ 	"io/fs"
+@@ -30,13 +32,12 @@ import (
+ 	"net/http"
+ 	"os"
+ 	"os/exec"
++	"strconv"
+ 	"sync"
+ 	"sync/atomic"
+ 	"time"
+ 
+ 	"github.com/godbus/dbus"
+-
+-
+ 	"github.com/gorilla/mux"
+ 	"golang.org/x/net/websocket"
+ 
+@@ -55,6 +56,9 @@ const (
+ 	configDir     = goconfig.DefaultConfigDir
+ 	socketTimeout = 7 * time.Second
+ 	frameSocket   = "/var/spool/managementd"
++
++	// The first file descriptor systemd passes to a socket activated service.
++	sdListenFdsStart = 3
+ )
+ 
+ var (
+@@ -70,6 +74,75 @@ var (
+ 	lastStayOn  time.Time
+ )
+ 
++var (
++	// When started by systemd's socket activation, managementd exits once it has
++	// had no requests and no connected clients for this long, and is started again
++	// by the next connection to its socket.
++	idleTimeout = 10 * time.Minute
++
++	requestsInFlight atomic.Int64
++	lastRequest      atomic.Int64 // Unix nanoseconds.
++)
++
++// trackActivity records requests, so managementd knows when it's idle. This
++// includes websockets, which are requests that last as long as the client is
++// connected.
++func trackActivity(next http.Handler) http.Handler {
++	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		requestsInFlight.Add(1)
++		defer func() {
++			lastRequest.Store(time.Now().UnixNano())
++			requestsInFlight.Add(-1)
++		}()
++		next.ServeHTTP(w, r)
++	})
++}
++
++func isIdle() bool {
++	return requestsInFlight.Load() == 0 && !hasActiveClients() &&
++		time.Since(time.Unix(0, lastRequest.Load())) > idleTimeout
++}
++
++// exitWhenIdle shuts the server down when nothing has used it for idleTimeout.
++// Nothing on the device needs managementd unless someone is using its web
++// interface or API, so it needn't keep running (and tc2-agent needn't keep
++// serving it frames) the rest of the time. systemd keeps listening on its
++// socket, and starts it again for the next connection.
++func exitWhenIdle(srv *http.Server) {
++	for range time.Tick(min(idleTimeout/10, time.Minute)) {
++		if !isIdle() {
++			continue
++		}
++		log.Printf("no requests or clients for %s, exiting until the next connection", idleTimeout)
++		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
++		defer cancel()
++		if err := srv.Shutdown(ctx); err != nil {
++			log.Errorf("shutting down: %v", err)
++		}
++		return
++	}
++}
++
++// listen returns the socket that systemd passed (see sd_listen_fds(3)) when it
++// started managementd for a connection to managementd.socket. Otherwise,
++// started on its own, it listens on the configured port.
++func listen(port int) (l net.Listener, activated bool, err error) {
++	pid, _ := strconv.Atoi(os.Getenv("LISTEN_PID"))
++	fds, _ := strconv.Atoi(os.Getenv("LISTEN_FDS"))
++	// Not for any child processes.
++	os.Unsetenv("LISTEN_PID")
++	os.Unsetenv("LISTEN_FDS")
++	os.Unsetenv("LISTEN_FDNAMES")
++	if pid == os.Getpid() && fds >= 1 {
++		f := os.NewFile(sdListenFdsStart, "systemd socket")
++		defer f.Close()
++		l, err = net.FileListener(f)
++		return l, true, err
++	}
++	l, err = net.Listen("tcp", fmt.Sprintf(":%d", port))
++	return l, false, err
++}
++
+ func hasActiveClients() bool {
+ 	socketsLock.RLock()
+ 	defer socketsLock.RUnlock()
+@@ -99,6 +172,7 @@ func maybeTriggerStayOnFor() {
+ 
+ type Args struct {
+ 	logging.LogArgs
++	IdleTimeout time.Duration `arg:"--idle-timeout" default:"10m" help:"when started by socket activation, exit after this long without requests or clients"`
+ }
+ 
+ func (Args) Version() string {
+@@ -201,6 +275,7 @@ func main() {
+ 	args := procArgs()
+ 
+ 	log = logging.NewLogger(args.LogLevel)
++	idleTimeout = args.IdleTimeout
+ 
+ 	log.Printf("running version: %s", version)
+ 
+@@ -215,6 +290,8 @@ func main() {
+ 	}
+ 
+ 	router := mux.NewRouter()
++	router.Use(trackActivity)
++	lastRequest.Store(time.Now().UnixNano())
+ 
+ 	// Serve up static content.
+ 	static := managementinterface.StaticFS()
+@@ -369,9 +446,22 @@ func main() {
+ 	// Handle the frame listener in a separate goroutine
+ 	go handleFrameListenerLoop()
+ 
+-	listenAddr := fmt.Sprintf(":%d", config.Port)
+-	log.Printf("listening on %s", listenAddr)
+-	log.Fatal(http.ListenAndServe(listenAddr, router))
++	listener, activated, err := listen(config.Port)
++	if err != nil {
++		log.Fatal(err)
++	}
++	srv := &http.Server{Handler: router}
++	if activated {
++		log.Printf("listening on %s, socket activated", listener.Addr())
++		go exitWhenIdle(srv)
++	} else {
++		log.Printf("listening on :%d", config.Port)
++	}
++	if err := srv.Serve(listener); !errors.Is(err, http.ErrServerClosed) {
++		log.Fatal(err)
++	}
++	// The frame socket's listener doesn't get to remove it, as nothing returns.
++	os.Remove(frameSocket)
+ }
+ 
+ func handleFrameListenerLoop() {

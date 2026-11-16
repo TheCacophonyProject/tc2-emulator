@@ -33,12 +33,24 @@ DISABLED_SERVICES=(
     # TODO: disable keyboard-setup in the real TC2 image too, then this entry
     # just matches it.
     keyboard-setup
-    # Rebuilds the HDMI console's cached font/keymap setup if its config changed,
-    # otherwise does nothing (~0.4s here). The console itself is set up by udev
-    # (90-console-setup.rules), which is unaffected.
-    # TODO: disable console-setup in the real TC2 image too, then this entry
-    # just matches it.
-    console-setup
+    # Global hotkey daemon reading /dev/input/event*; a TC2 has no input devices.
+    # TODO: disable triggerhappy (service and socket) in the real TC2 image too,
+    # then this entry just matches it.
+    triggerhappy
+    # Desktop removable-media automounter; no one plugs storage into a TC2.
+    # TODO: disable udisks2 in the real TC2 image too, then this entry just
+    # matches it.
+    udisks2
+    # Login prompt on the HDMI console, which never has a monitor or keyboard.
+    # TODO: disable getty@tty1 in the real TC2 image too, then this entry just
+    # matches it.
+    getty@tty1
+    # Turns off the official Pi DSI display's backlight at shutdown; no display.
+    # It's already skipped here (ConditionPathIsDirectory=/proc/device-tree/
+    # rpi_backlight), so this entry changes nothing in the emulator.
+    # TODO: disable rpi-display-backlight in the real TC2 image too, then this
+    # entry just matches it.
+    rpi-display-backlight
 )
 
 # Generic arm64 kernel for QEMU -M virt. The initramfs is built in the chroot, so
@@ -96,6 +108,12 @@ while read -r pkg version; do
     [[ -n $placeholder_minion_id ]] && rm /etc/salt/minion_id
     rm "/tmp/$pkg.deb"
 done < /tmp/tc2-emu-guest/versions/packages.txt
+
+# The rest of what salt deploys that the older image doesn't have yet: a highstate
+# of the pinned saltops commit (guest/versions/saltops.txt), see
+# guest/salt/apply-salt.sh. The Cacophony packages are already the pinned versions
+# from above, so this is files, models and service enablement.
+/tmp/tc2-emu-guest/salt/apply-salt.sh
 
 # No salt master. The image's minion config retries it forever (master_tries:
 # -1), so salt-call without --local never exits: managementd runs `salt-call
@@ -168,6 +186,25 @@ replace_service tc2-hat-attiny "tc2-hat-controller attiny"
 replace_service cacophony-config-sync cacophony-config-sync-launcher
 replace_service managementd managementd
 
+# managementd runs socket activated (guest/patches/management-interface 0003):
+# systemd listens on port 80 and starts it for the first connection, and it exits
+# when idle, so it and tc2-agent's frame forwarding to it don't run with nobody
+# using the web interface. The unit is the one the patch adds to the managementd
+# package; the image's package doesn't have it yet, and still enables the service.
+cat > /etc/systemd/system/managementd.socket <<'EOF'
+[Unit]
+Description=Cacophonator management interface socket
+ConditionPathExists=/etc/salt/minion_id
+
+[Socket]
+ListenStream=80
+
+[Install]
+WantedBy=multi-user.target
+EOF
+systemctl disable managementd.service
+systemctl enable managementd.socket
+
 for svc in "${DISABLED_SERVICES[@]}"; do
     mkdir -p "/etc/systemd/system/$svc.service.d"
     printf '[Unit]\nConditionKernelCommandLine=tc2-emu.enable=%s\n' "$svc" \
@@ -230,7 +267,52 @@ WantedBy=multi-user.target
 EOF
 systemctl enable tc2-emu-dns.service
 echo 'port=0' > /etc/dnsmasq.d/tc2-emu.conf
-printf '[main]\ndns=none\n' > /etc/NetworkManager/conf.d/tc2-emu.conf
+# The guest's eth0 is the link to the host (QEMU user networking). The image
+# configures it statically through ifupdown (/etc/network/interfaces.d/eth0,
+# from saltops tc2/network-manager, only for debugging with a laptop plugged in,
+# which nobody does any more). With an interface defined there, ifupdown-pre
+# runs `udevadm settle` and networking.service runs ifup with its hooks, together
+# ~12s of the emulator's boot. Remove it and set the address here instead.
+# TODO: remove /etc/network/interfaces.d/eth0 (the saltops state) from the real
+# TC2 image too, then only the tc2-emu-eth0 service below is emulator-specific.
+rm -f /etc/network/interfaces.d/eth0
+# Nothing else on a TC2 uses ifupdown (NetworkManager does the wifi, driven by
+# rpi-net-manager, and the USB modem's usb0; none of the Cacophony software calls
+# ifup) or NFS, yet they cost ~7s of CPU at boot, which is all there is to do on the
+# emulated CPU: networking.service's hook scripts (~1s idle, 4.8s at boot),
+# 80-ifupdown.rules running `ifup --allow=hotplug` for each network device, and
+# 99-nfs.rules running `nfsrahead` (which always fails) for each block device.
+# TODO: purge ifupdown and nfs-common from the real TC2 image too (a pkg.purged
+# in saltops' tc2/basics, with the eth0 state removed), then this just matches it.
+apt-get purge -y ifupdown nfs-common
+# console-setup's udev rules load the console font and set UTF-8 mode on each of the
+# virtual consoles as they appear, ~1s of CPU at boot, for the HDMI console only a
+# monitor plugged into a TC2 would show (the kernel's font and UTF-8 default do).
+# This also removes console-setup.service. keyboard-setup stays, disabled above.
+# TODO: purge console-setup and console-setup-linux from the real TC2 image too
+# (add them to the pkg.purged in saltops' tc2/basics), then this just matches it.
+apt-get purge -y console-setup console-setup-linux
+cat > /etc/systemd/system/tc2-emu-eth0.service <<EOF
+[Unit]
+Description=Emulator: address the host link on eth0
+Requires=sys-subsystem-net-devices-eth0.device
+After=sys-subsystem-net-devices-eth0.device
+Before=network-pre.target
+Wants=network-pre.target
+DefaultDependencies=no
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/sbin/ip addr replace 192.168.1.2/24 dev eth0
+ExecStart=/sbin/ip link set eth0 up
+
+[Install]
+WantedBy=sysinit.target
+EOF
+systemctl enable tc2-emu-eth0.service
+# Without the ifupdown entry NetworkManager would manage eth0 and run DHCP on it.
+printf '[main]\ndns=none\n\n[keyfile]\nunmanaged-devices=interface-name:eth0\n' > /etc/NetworkManager/conf.d/tc2-emu.conf
 rm -f /etc/resolv.conf
 echo 'nameserver 127.0.0.1' > /etc/resolv.conf
 

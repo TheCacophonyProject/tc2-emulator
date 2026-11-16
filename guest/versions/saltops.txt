@@ -1,0 +1,5 @@
+# The saltops commit the image is brought up to, as a salt highstate would
+# (guest/salt/apply-salt.sh). It's the test branch at the commit
+# salt-version-info reflects, so its package pins are those of packages.txt.
+# Regenerate with scripts/update-versions.sh.
+commit f6d20306584727a9f222da146a0da7a9c47dc57d
