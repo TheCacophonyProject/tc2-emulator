@@ -128,7 +128,7 @@ E2E_HOST := http://host.docker.internal
 E2E_TESTS := new_device_setup config_sync
 # cacophony-config-sync waits only 100ms after config changes, rather than 10s.
 e2e: build stubs
-	TC2_CONFIG_SYNC_DELAY=100ms docker compose up -d --force-recreate
+	TC2_CONFIG_SYNC_DELAY=100ms TC2_AUTOLOGIN=0 docker compose up -d --force-recreate
 	$(DOCKER_RUN) --add-host host.docker.internal:host-gateway \
 		-e TC2_E2E_API=$(E2E_HOST):1080 -e TC2_E2E_MANAGEMENTD=$(E2E_HOST):8080 \
 		-e CARGO_HOME=/src/target/docker/cargo-home -e CARGO_TARGET_DIR=/src/target/docker \

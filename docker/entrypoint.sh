@@ -11,6 +11,7 @@
 #   TC2_CONFIG_SYNC_DELAY  how long cacophony-config-sync waits after the config
 #                  file changes before syncing, e.g. 100ms (default 10s, as on a
 #                  real device)
+#   TC2_AUTOLOGIN=0  no autologin on the serial console (default: log in as pi)
 set -euo pipefail
 
 IMAGES=${TC2_IMAGES:-/images}
@@ -28,11 +29,15 @@ if [[ ${TC2_PERSIST:-0} != 1 || ! -f $RUN ]]; then
     qemu-img create -q -f qcow2 -F qcow2 -b "$IMAGES/base.qcow2" "$RUN"
 fi
 
-APPEND="root=PARTUUID=93147b3c-02 rootfstype=ext4 rootwait fsck.repair=yes console=ttyAMA0 net.ifnames=0 spidev.bufsiz=65536"
+# apparmor=0: Debian's kernel enables AppArmor by default, but the Raspberry Pi
+# kernel a TC2 runs has CONFIG_LSM="" and cmdline.txt doesn't turn it on, so
+# apparmor.service is skipped there. Here it took ~6s of the boot.
+APPEND="root=PARTUUID=93147b3c-02 rootfstype=ext4 rootwait fsck.repair=yes console=ttyAMA0 net.ifnames=0 spidev.bufsiz=65536 apparmor=0"
 [[ -n ${TC2_GROUP:-} ]] && APPEND+=" tc2-emu.group=$TC2_GROUP"
 [[ -n ${TC2_NAME:-} ]] && APPEND+=" tc2-emu.name=$TC2_NAME"
 [[ ${TC2_AGENT:-} == real ]] && APPEND+=" tc2-emu.agent=real"
 [[ -n ${TC2_CONFIG_SYNC_DELAY:-} ]] && APPEND+=" tc2-emu.config-sync-delay=$TC2_CONFIG_SYNC_DELAY"
+[[ ${TC2_AUTOLOGIN:-} == 0 ]] && APPEND+=" tc2-emu.autologin=0"
 
 # The image configures eth0 statically as 192.168.1.2/24 with no gateway, so the
 # user-mode network uses that subnet. QEMU presents forwarded connections with

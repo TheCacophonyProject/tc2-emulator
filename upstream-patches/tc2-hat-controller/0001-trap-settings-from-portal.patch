@@ -34,7 +34,7 @@ index d624d6b..369f6ed 100644
  			if err != nil {
  				log.Error("Error sending classification:", err)
 diff --git a/internal/tc2-hat-comms/config.go b/internal/tc2-hat-comms/config.go
-index 7cc26ba..d17a618 100644
+index 778dab5..f517227 100644
 --- a/internal/tc2-hat-comms/config.go
 +++ b/internal/tc2-hat-comms/config.go
 @@ -2,18 +2,15 @@ package comms
@@ -57,7 +57,44 @@ index 7cc26ba..d17a618 100644
  	TrapConfig config.Trap
  
  	// LowPowerMode is set when the RP2040 does the recording rather than the Raspberry Pi.
-@@ -48,11 +45,9 @@ func ParseCommsConfig(configDir string) (*CommsConfig, error) {
+@@ -32,18 +29,6 @@ func ParseCommsConfig(configDir string) (*CommsConfig, error) {
+ 		return nil, err
+ 	}
+ 
+-	// A zero or negative duration would mean the trap is never enabled (or never protected),
+-	// so fall back to the default instead.
+-	defaults := config.DefaultComms()
+-	if c.TrapDuration <= 0 {
+-		log.Warnf("Invalid trap-duration '%s', using default of '%s'", c.TrapDuration, defaults.TrapDuration)
+-		c.TrapDuration = defaults.TrapDuration
+-	}
+-	if c.ProtectDuration <= 0 {
+-		log.Warnf("Invalid protect-duration '%s', using default of '%s'", c.ProtectDuration, defaults.ProtectDuration)
+-		c.ProtectDuration = defaults.ProtectDuration
+-	}
+-
+ 	gpio := config.DefaultGPIO()
+ 	if err := conf.Unmarshal(config.GPIOKey, &gpio); err != nil {
+ 		return nil, err
+@@ -54,17 +39,27 @@ func ParseCommsConfig(configDir string) (*CommsConfig, error) {
+ 		return nil, err
+ 	}
+ 
++	// A zero or negative duration would mean the trap is never enabled (or never protected),
++	// so fall back to the default instead.
++	defaults := config.DefaultTrap()
++	if trap.TrapDuration <= 0 {
++		log.Warnf("Invalid trap-duration '%s', using default of '%s'", trap.TrapDuration, defaults.TrapDuration)
++		trap.TrapDuration = defaults.TrapDuration
++	}
++	if trap.ProtectDuration <= 0 {
++		log.Warnf("Invalid protect-duration '%s', using default of '%s'", trap.ProtectDuration, defaults.ProtectDuration)
++		trap.ProtectDuration = defaults.ProtectDuration
++	}
++
+ 	recorder := config.DefaultThermalRecorder()
+ 	if err := conf.Unmarshal(config.ThermalRecorderKey, &recorder); err != nil {
+ 		return nil, err
  	}
  
  	return &CommsConfig{
@@ -92,7 +129,7 @@ index c1585ea..45a0ef6 100644
  	eventsChan := make(chan event, 10)
  
 diff --git a/internal/tc2-hat-comms/simple.go b/internal/tc2-hat-comms/simple.go
-index 0cf8398..3b340d1 100644
+index bce30ba..563cd46 100644
 --- a/internal/tc2-hat-comms/simple.go
 +++ b/internal/tc2-hat-comms/simple.go
 @@ -50,14 +50,17 @@ func processSimpleOutput(config *CommsConfig, eventSignals chan event) error {
@@ -122,10 +159,10 @@ index 0cf8398..3b340d1 100644
  		var delay = 10 * time.Second
 -		trapDisableTime := lastTrapSpeciesSighting.Add(config.TrapDuration)
 +		trapDisableTime := lastTrapSpeciesSighting.Add(config.TrapConfig.TrapDuration)
- 		if trapEnabled && time.Until(trapDisableTime) < delay {
- 			delay = time.Until(trapDisableTime)
- 		}
-@@ -108,7 +111,7 @@ func processSimpleOutput(config *CommsConfig, eventSignals chan event) error {
+ 		// Only wait for the disable time if it is still ahead. If it has already passed (e.g. trap
+ 		// enabled by default with no recent sighting) a zero or negative delay would make
+ 		// time.After fire straight away and this loop would spin.
+@@ -111,7 +114,7 @@ func processSimpleOutput(config *CommsConfig, eventSignals chan event) error {
  				log.Debugf("Received tracking event: %+v", v)
  				log.Debugf("Found new track: %+v", t)
  
@@ -134,7 +171,7 @@ index 0cf8398..3b340d1 100644
  				if protect {
  					disablingReason = fmt.Sprintf("Found an %s of confidence %d that needs to be protected", animal, conf)
  					log.Debug(disablingReason)
-@@ -116,7 +119,7 @@ func processSimpleOutput(config *CommsConfig, eventSignals chan event) error {
+@@ -119,7 +122,7 @@ func processSimpleOutput(config *CommsConfig, eventSignals chan event) error {
  					break
  				}
  

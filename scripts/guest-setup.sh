@@ -26,6 +26,19 @@ DISABLED_SERVICES=(
     # No wlan0. It tries to start the hotspot anyway, taking NetworkManager down
     # (and with it the host's connections to managementd), then exits and restarts.
     rpi-net-manager
+    # Loads the console keymap for a keyboard on the HDMI console, which a TC2
+    # never has (and the layout is "us", the kernel's default anyway): the cached
+    # /etc/console-setup/cached_setup_keyboard.sh (kbd_mode on tty1-6, loadkeys),
+    # ~1.4s on an idle guest and ~2.6s at boot.
+    # TODO: disable keyboard-setup in the real TC2 image too, then this entry
+    # just matches it.
+    keyboard-setup
+    # Rebuilds the HDMI console's cached font/keymap setup if its config changed,
+    # otherwise does nothing (~0.4s here). The console itself is set up by udev
+    # (90-console-setup.rules), which is unaffected.
+    # TODO: disable console-setup in the real TC2 image too, then this entry
+    # just matches it.
+    console-setup
 )
 
 # Generic arm64 kernel for QEMU -M virt. The initramfs is built in the chroot, so
@@ -90,6 +103,12 @@ done < /tmp/tc2-emu-guest/versions/packages.txt
 # piled up until the guest ran out of memory. Run salt-call masterless instead.
 mkdir -p /etc/salt/minion.d
 echo 'file_client: local' > /etc/salt/minion.d/tc2-emu.conf
+# Even masterless, each salt-call takes ~38MB and minutes to start on the guest,
+# and with the e2e tests reregistering every few seconds they still piled up
+# until it ran out of memory. Use the stub on the share (guest/bin/salt-call),
+# which sets grains directly; the real one stays as salt-call.distrib.
+dpkg-divert --local --rename --add /usr/bin/salt-call
+ln -sf "$EMU_DIR/guest/salt-call" /usr/bin/salt-call
 
 cat > /etc/modprobe.d/tc2-emu.conf <<'EOF'
 # One chip at base 0 so sysfs GPIO numbers match the Pi's BCM numbers.
@@ -280,12 +299,22 @@ WantedBy=dev-virtio\x2dports-org.cacophony.tc2\x2demu.journal.device
 EOF
 systemctl enable tc2-emu-journal.service
 
-# Autologin on the serial console.
+# Autologin on the serial console, unless tc2-emu.autologin=0 (TC2_AUTOLOGIN=0,
+# as `make e2e` sets): the login session it starts costs a few seconds of CPU
+# just as the device registers.
+cat > /usr/local/sbin/tc2-emu-serial-getty <<'EOF'
+#!/bin/sh
+# Usage: tc2-emu-serial-getty <tty> <term>
+autologin="--autologin pi"
+grep -qw tc2-emu.autologin=0 /proc/cmdline && autologin=
+exec /sbin/agetty $autologin --keep-baud 115200,57600,38400,9600 "$1" "$2"
+EOF
+chmod +x /usr/local/sbin/tc2-emu-serial-getty
 mkdir -p /etc/systemd/system/serial-getty@ttyAMA0.service.d
 cat > /etc/systemd/system/serial-getty@ttyAMA0.service.d/autologin.conf <<'EOF'
 [Service]
 ExecStart=
-ExecStart=-/sbin/agetty --autologin pi --keep-baud 115200,57600,38400,9600 %I $TERM
+ExecStart=-/usr/local/sbin/tc2-emu-serial-getty %I $TERM
 EOF
 
 # SSH key for tests.

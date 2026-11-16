@@ -1,16 +1,16 @@
 diff --git a/src/camera_transfer_state.rs b/src/camera_transfer_state.rs
-index 76f94d9..9907fde 100644
+index de90fb7..440c70a 100644
 --- a/src/camera_transfer_state.rs
 +++ b/src/camera_transfer_state.rs
-@@ -10,6 +10,7 @@ use crate::event_logger::{
- use crate::frame_socket_server::{FileOffloadInfo, FrameSocketServerMessage};
- use crate::program_rp2040::{erase_rp2040_flash_and_exit, offload_erase_requested, program_rp2040};
+@@ -15,6 +15,7 @@ use crate::program_rp2040::{
+     offload_erase_requested, program_rp2040,
+ };
  use crate::recording_state::RecordingMode;
 +use crate::rp2040_link::TransferPort;
+ use crate::rp2040_reset::{RP2040_RESET_TIMEOUT, Rp2040ResetRequest};
  use crate::save_audio::save_audio_file_to_disk;
  use crate::save_cptv::save_cptv_file_to_disk;
- use crate::utils::u8_slice_as_u16_slice;
-@@ -19,8 +20,6 @@ use chrono::{DateTime, Utc};
+@@ -25,8 +26,6 @@ use chrono::{DateTime, Utc};
  use chrono_tz::Tz::Pacific__Auckland;
  use crc::{CRC_16_XMODEM, Crc};
  use log::{error, info, warn};
@@ -19,7 +19,7 @@ index 76f94d9..9907fde 100644
  use rustbus::connection::Timeout;
  use rustbus::{DuplexConn, get_system_bus_path};
  use std::ops::Not;
-@@ -87,7 +86,7 @@ impl TryFrom<u8> for ExtTransferMessage {
+@@ -114,7 +113,7 @@ impl TryFrom<u8> for ExtTransferMessage {
  pub fn enter_camera_transfer_loop(
      initial_config: DeviceConfig,
      mut dbus_conn: DuplexConn,
@@ -28,10 +28,10 @@ index 76f94d9..9907fde 100644
      device_config_change_channel_rx: Receiver<DeviceConfig>,
      restart_rp2040_channel_tx: Sender<bool>,
      sig_term: Arc<AtomicBool>,
-@@ -96,83 +95,6 @@ pub fn enter_camera_transfer_loop(
-     mut recording_state: RecordingState,
-     medium_power_mode: Arc<AtomicBool>,
- ) {
+@@ -126,83 +125,6 @@ pub fn enter_camera_transfer_loop(
+     if offload_medium_power_duplicates {
+         info!("Letting the rp2040 offload recordings already received by medium power streaming");
+     }
 -    let spi_speed = spi_speed_mhz * 1_000_000;
 -    // rPi3 can handle 12Mhz (@600Mhz), may need to back it off a little to have some slack.
 -    let mut spi;
@@ -112,11 +112,10 @@ index 76f94d9..9907fde 100644
      // 65K buffer that we won't fully use at the moment.
      let mut raw_read_buffer = [0u8; 65535];
      let mut got_first_frame = false;
-@@ -292,60 +214,8 @@ pub fn enter_camera_transfer_loop(
-             rp2040_reset_in_progress = true;
-             restart_rp2040_ack.store(false, Ordering::Relaxed);
+@@ -313,59 +235,8 @@ pub fn enter_camera_transfer_loop(
+             }
          }
--
+ 
 -        let poll_result = pin.poll_interrupt(false, Some(Duration::from_millis(2000)));
 -        if let Ok(_pin_level) = poll_result
 -            && _pin_level.is_some()
@@ -175,7 +174,7 @@ index 76f94d9..9907fde 100644
              {
                  let header_slice = &raw_read_buffer[..header_length];
                  let transfer_type = header_slice[0];
-@@ -386,7 +256,7 @@ pub fn enter_camera_transfer_loop(
+@@ -406,7 +277,7 @@ pub fn enter_camera_transfer_loop(
  
                      LittleEndian::write_u16(&mut return_payload_buf[4..6], 0);
                      LittleEndian::write_u16(&mut return_payload_buf[6..8], 0);
@@ -184,7 +183,7 @@ index 76f94d9..9907fde 100644
                      if process_interrupted(&sig_term, &mut dbus_conn) {
                          break 'transfer;
                      }
-@@ -396,7 +266,7 @@ pub fn enter_camera_transfer_loop(
+@@ -416,7 +287,7 @@ pub fn enter_camera_transfer_loop(
                      // warn!("zero-sized payload");
                      LittleEndian::write_u16(&mut return_payload_buf[4..6], 0);
                      LittleEndian::write_u16(&mut return_payload_buf[6..8], 0);
@@ -193,7 +192,7 @@ index 76f94d9..9907fde 100644
                      if process_interrupted(&sig_term, &mut dbus_conn) {
                          break 'transfer;
                      }
-@@ -405,7 +275,7 @@ pub fn enter_camera_transfer_loop(
+@@ -425,7 +296,7 @@ pub fn enter_camera_transfer_loop(
                  if !(CAMERA_CONNECT_INFO..=CAMERA_RECORDING_TRANSFER).contains(&transfer_type) {
                      LittleEndian::write_u16(&mut return_payload_buf[4..6], 0);
                      LittleEndian::write_u16(&mut return_payload_buf[6..8], 0);
@@ -202,8 +201,8 @@ index 76f94d9..9907fde 100644
  
                      // NOTE: We limit the frequency of this since it can
                      //  spin in this state pretty aggressively.
-@@ -480,7 +350,7 @@ pub fn enter_camera_transfer_loop(
-                             .copy_from_slice(&piece_with_length);
+@@ -517,7 +388,7 @@ pub fn enter_camera_transfer_loop(
+                         return_payload_buf[9] = !flag;
                      }
                      // Always write the return buffer
 -                    spi.write(&return_payload_buf).unwrap();
@@ -211,9 +210,9 @@ index 76f94d9..9907fde 100644
                      if crc == crc_from_remote {
                          if is_file_transfer_progress_message {
                              recording_state.update_offload_progress(transfer_block);
-@@ -508,6 +378,17 @@ pub fn enter_camera_transfer_loop(
-                                     num_events_to_offload,
-                                 );
+@@ -548,6 +419,17 @@ pub fn enter_camera_transfer_loop(
+                                     medium_power_offloads.no_recordings_left();
+                                 }
  
 +                                if firmware_version != EXPECTED_RP2040_FIRMWARE_VERSION
 +                                    && port.is_emulated()
@@ -229,7 +228,25 @@ index 76f94d9..9907fde 100644
                                  if firmware_version != EXPECTED_RP2040_FIRMWARE_VERSION {
                                      exit_cleanly(&mut dbus_conn);
                                      info!(
-@@ -916,7 +797,7 @@ pub fn enter_camera_transfer_loop(
+@@ -568,7 +450,7 @@ pub fn enter_camera_transfer_loop(
+                                 if offload_erase_requested() {
+                                     if num_files_to_offload == 0 {
+                                         exit_cleanly(&mut dbus_conn);
+-                                        erase_rp2040_flash_and_exit();
++                                        erase_rp2040_flash_and_exit(port.is_emulated());
+                                     } else if last_handshake_forced_offload {
+                                         if offload_erase_tracker.forced_offload_handshake(
+                                             num_files_to_offload,
+@@ -582,7 +464,7 @@ pub fn enter_camera_transfer_loop(
+                                                 flash without offloading them"
+                                             );
+                                             exit_cleanly(&mut dbus_conn);
+-                                            erase_rp2040_flash_and_exit();
++                                            erase_rp2040_flash_and_exit(port.is_emulated());
+                                         }
+                                         info!(
+                                             "Offloading {num_files_to_offload} file(s) \
+@@ -986,7 +868,7 @@ pub fn enter_camera_transfer_loop(
                          // force transfer to fail rp2040 waits 65 ms so 70 gives us some leeway
                          info!("Forcing transfer to fail as header integrity failed");
                          sleep(Duration::from_millis(70));
@@ -238,7 +255,7 @@ index 76f94d9..9907fde 100644
                              .map_err(|e| {
                                  error!("SPI read error: {e:?}");
  
-@@ -927,7 +808,7 @@ pub fn enter_camera_transfer_loop(
+@@ -997,7 +879,7 @@ pub fn enter_camera_transfer_loop(
                              .unwrap();
                          continue;
                      }
@@ -247,7 +264,7 @@ index 76f94d9..9907fde 100644
                          .map_err(|e| {
                              error!("SPI read error: {e:?}");
  
-@@ -987,7 +868,7 @@ pub fn enter_camera_transfer_loop(
+@@ -1063,7 +945,7 @@ pub fn enter_camera_transfer_loop(
                      // header length is already in num_bytes....?
                      let aligned_offset: usize = (num_bytes + 3) & !3;
  
@@ -257,42 +274,41 @@ index 76f94d9..9907fde 100644
                              error!("SPI read error: {e:?}");
  
 diff --git a/src/frame_socket_server.rs b/src/frame_socket_server.rs
-index a55e1fa..266521f 100644
+index 58291b7..923f847 100644
 --- a/src/frame_socket_server.rs
 +++ b/src/frame_socket_server.rs
-@@ -1,11 +1,10 @@
+@@ -1,13 +1,12 @@
  use crate::camera_transfer_state::CameraHandshakeInfo;
+ use crate::medium_power_offloads;
 -use crate::program_rp2040::program_rp2040;
  use crate::recording_state::{RecordingMode, RecordingState};
 +use crate::rp2040_link::Rp2040Control;
- use crate::socket_stream::{SocketStream, get_socket_address};
+ use crate::socket_stream::{ClientMsg, SocketStream, get_socket_address};
  use crate::telemetry::{Telemetry, read_telemetry};
  use crate::{FRAME_LENGTH, cptv_frame_dispatch};
+ use byteorder::{ByteOrder, LittleEndian};
  use log::{debug, error, info, warn};
 -use rppal::gpio::OutputPin;
+ use std::collections::VecDeque;
  use std::sync::Arc;
  use std::sync::atomic::{AtomicBool, Ordering};
- use std::sync::mpsc::{Receiver, RecvTimeoutError};
-@@ -29,27 +28,20 @@ pub struct FileOffloadInfo {
+@@ -170,27 +169,16 @@ fn poll_medium_power_client(
  
  fn restart_rp2040_if_requested(
      restart_rp2040_channel_rx: &Receiver<bool>,
 -    run_pin: &mut OutputPin,
 +    rp2040_control: &mut Rp2040Control,
-     restart_rp2040_ack: &mut Arc<AtomicBool>,
  ) {
      // FIXME: Check if the rp2040 recording flag is set before restarting.
  
      // Check if we need to reset rp2040 because of a config change
      if restart_rp2040_channel_rx.try_recv().is_ok() {
--        restart_rp2040(run_pin, restart_rp2040_ack);
-+        restart_rp2040(rp2040_control, restart_rp2040_ack);
+-        restart_rp2040(run_pin);
++        rp2040_control.restart();
      }
  }
  
--fn restart_rp2040(run_pin: &mut OutputPin, restart_rp2040_ack: &mut Arc<AtomicBool>) {
-+fn restart_rp2040(rp2040_control: &mut Rp2040Control, restart_rp2040_ack: &mut Arc<AtomicBool>) {
-     restart_rp2040_ack.store(true, Ordering::Relaxed);
+-fn restart_rp2040(run_pin: &mut OutputPin) {
 -    info!("Restarting rp2040");
 -    if !run_pin.is_set_high() {
 -        run_pin.set_high();
@@ -301,74 +317,75 @@ index a55e1fa..266521f 100644
 -    run_pin.set_low();
 -    sleep(Duration::from_millis(1000));
 -    run_pin.set_high();
-+    rp2040_control.restart();
- }
- 
+-}
+-
  /// Handles one frame message from the rp2040 while in medium power mode.
-@@ -73,7 +65,7 @@ fn handle_medium_power_message(
+ /// In medium power mode the rp2040 wakes up the PI while recording and attempts to send the gzipped
+ /// CPTV frames of the current recording to tc2-agent, starting from the first frame to the current frame or end of file if the recording is now finished.
+@@ -212,7 +200,7 @@ fn handle_medium_power_message(
      sent_end: &mut bool,
      received_end: &mut bool,
      ms_elapsed: &mut u64,
 -    run_pin: &mut OutputPin,
 +    rp2040_control: &mut Rp2040Control,
-     restart_rp2040_ack: &mut Arc<AtomicBool>,
      message_handled: &mut bool,
- ) {
-@@ -116,7 +108,7 @@ fn handle_medium_power_message(
+     streamed_recording: &mut Option<StreamedRecording>,
+     awaiting_done: &mut VecDeque<u64>,
+@@ -259,7 +247,7 @@ fn handle_medium_power_message(
                      "New file is missing the GZIP header {:?} restart rp2040",
-                     &frame_data[..16 + 10]
+                     &frame_data[..FIRST_PACKET_HEADER_LENGTH + 10]
                  );
--                restart_rp2040(run_pin, restart_rp2040_ack);
-+                restart_rp2040(rp2040_control, restart_rp2040_ack);
+-                restart_rp2040(run_pin);
++                rp2040_control.restart();
                  // what do we do here???
                  // force rp2040 to offload last file??
                  // if we could send a message ask for the start again
-@@ -154,7 +146,7 @@ fn handle_medium_power_message(
-                         "Lost socket connection part way through medium power offload (Something must have gone wrong), Restarting RP2040"
+@@ -330,7 +318,7 @@ fn handle_medium_power_message(
+                     error!(
+                         "Lost socket connection part way through medium power offload (Something must have gone wrong)"
                      );
-                     // restart rp2040 and offload the file
--                    restart_rp2040(run_pin, restart_rp2040_ack);
-+                    restart_rp2040(rp2040_control, restart_rp2040_ack);
+-                    // restart_rp2040(run_pin);
++                    // rp2040_control.restart();
                      *frame_i = 0;
                  } else {
                      info!("Starting new file");
-@@ -215,7 +207,7 @@ pub fn spawn_frame_socket_server_thread(
+@@ -402,7 +390,7 @@ pub fn spawn_frame_socket_server_thread(
      restart_rp2040_channel_rx: Receiver<bool>,
      camera_handshake_channel_rx: Receiver<FrameSocketServerMessage>,
      serve_frames_via_wifi: bool,
 -    mut run_pin: OutputPin,
 +    mut rp2040_control: Rp2040Control,
-     mut restart_rp2040_ack: Arc<AtomicBool>,
      recording_state: &RecordingState,
      medium_power_mode_flag: Arc<AtomicBool>,
-@@ -250,7 +242,7 @@ pub fn spawn_frame_socket_server_thread(
+ ) {
+@@ -434,7 +422,7 @@ pub fn spawn_frame_socket_server_thread(
+             let mut sockets: [(String, bool, Option<SocketStream>); 2] =
+                 [(address, serve_frames_via_wifi, None), (management_address, false, None)];
  
-             restart_rp2040_if_requested(
-                 &restart_rp2040_channel_rx,
--                &mut run_pin,
-+                &mut rp2040_control,
-                 &mut restart_rp2040_ack,
-             );
+-            restart_rp2040_if_requested(&restart_rp2040_channel_rx, &mut run_pin);
++            restart_rp2040_if_requested(&restart_rp2040_channel_rx, &mut rp2040_control);
              let mut recv_timeout_ms = 10;
-@@ -265,7 +257,7 @@ pub fn spawn_frame_socket_server_thread(
+             info!("Connecting to frame sockets");
+             let mut ms_elapsed = 0;
+@@ -449,7 +437,7 @@ pub fn spawn_frame_socket_server_thread(
+             let address = &get_socket_address(serve_frames_via_wifi);
+             let mut medium_power_mode = medium_power_mode_flag.load(Ordering::Relaxed);
              loop {
-                 restart_rp2040_if_requested(
-                     &restart_rp2040_channel_rx,
--                    &mut run_pin,
-+                    &mut rp2040_control,
-                     &mut restart_rp2040_ack,
-                 );
+-                restart_rp2040_if_requested(&restart_rp2040_channel_rx, &mut run_pin);
++                restart_rp2040_if_requested(&restart_rp2040_channel_rx, &mut rp2040_control);
                  let new_medium_power_mode = medium_power_mode_flag.load(Ordering::Relaxed);
-@@ -325,7 +317,7 @@ pub fn spawn_frame_socket_server_thread(
+                 if new_medium_power_mode != medium_power_mode {
+                     info!("Switching medium power mode to {new_medium_power_mode}");
+@@ -508,7 +496,7 @@ pub fn spawn_frame_socket_server_thread(
                          &mut sent_end,
                          &mut received_end,
                          &mut ms_elapsed,
 -                        &mut run_pin,
 +                        &mut rp2040_control,
-                         &mut restart_rp2040_ack,
                          &mut message_handled,
-                     );
-@@ -346,6 +338,7 @@ pub fn spawn_frame_socket_server_thread(
+                         &mut streamed_recording,
+                         &mut awaiting_done,
+@@ -553,6 +541,7 @@ pub fn spawn_frame_socket_server_thread(
                          &mut prev_frame_num,
                          &recording_state,
                          &mut recv_timeout_ms,
@@ -376,7 +393,7 @@ index a55e1fa..266521f 100644
                      );
                  }
              }
-@@ -361,6 +354,7 @@ fn handle_payload_from_frame_acquire_thread(
+@@ -568,6 +557,7 @@ fn handle_payload_from_frame_acquire_thread(
      prev_frame_num: &mut Option<u32>,
      recording_state: &RecordingState,
      recv_timeout_ms: &mut u64,
@@ -384,7 +401,7 @@ index a55e1fa..266521f 100644
  ) {
      match result {
          Ok(FrameSocketServerMessage {
-@@ -491,7 +485,7 @@ fn handle_payload_from_frame_acquire_thread(
+@@ -698,7 +688,7 @@ fn handle_payload_from_frame_acquire_thread(
                          };
                          if last_reprogram_over_1hr_ago {
                              let _ = fs::remove_file(reprogram_file);
@@ -394,17 +411,18 @@ index a55e1fa..266521f 100644
                                      let now = SystemTime::now();
                                      let timestamp_seconds = now
 diff --git a/src/main.rs b/src/main.rs
-index c83dd8c..333adb3 100644
+index a56983c..b49baea 100644
 --- a/src/main.rs
 +++ b/src/main.rs
-@@ -14,16 +14,14 @@ mod frame_socket_server;
+@@ -15,6 +15,7 @@ mod medium_power_offloads;
  mod mode_config;
  mod program_rp2040;
  mod recording_state;
 +mod rp2040_link;
+ mod rp2040_reset;
  mod save_audio;
  mod save_cptv;
- mod socket_stream;
+@@ -22,10 +23,7 @@ mod socket_stream;
  mod telemetry;
  mod utils;
  
@@ -415,7 +433,7 @@ index c83dd8c..333adb3 100644
  use std::process;
  use std::process::Command;
  use std::sync::Arc;
-@@ -114,15 +112,13 @@ fn main() {
+@@ -116,15 +114,14 @@ fn main() {
          "\n=========\nStarting thermal camera 2 agent {VERSION}, run with --help to see options.\n"
      );
  
@@ -424,20 +442,21 @@ index c83dd8c..333adb3 100644
 +    let startup_mode_config: ModeConfig = argh::from_env();
 +    let serve_frames_via_wifi = startup_mode_config.use_wifi;
 +    let spi_speed_mhz = startup_mode_config.spi_speed_mhz;
++    let offload_medium_power_duplicates = startup_mode_config.offload_medium_power_duplicates;
 +    let rp2040_link = startup_mode_config.rp2040_link;
  
--    let (serve_frames_via_wifi, spi_speed_mhz) = {
+-    let (serve_frames_via_wifi, spi_speed_mhz, offload_medium_power_duplicates) = {
 -        let startup_mode_config: ModeConfig = argh::from_env();
 -        let serve_frames_via_wifi = startup_mode_config.use_wifi;
 -        let spi_speed = startup_mode_config.spi_speed_mhz;
--        (serve_frames_via_wifi, spi_speed)
+-        (serve_frames_via_wifi, spi_speed, startup_mode_config.offload_medium_power_duplicates)
 -    };
 +    check_for_sufficient_free_disk_space();
 +    check_if_rp2040_needs_programming(rp2040_link.is_some());
  
      let device_config = DeviceConfig::load_from_fs();
      if device_config.is_err() {
-@@ -167,19 +163,8 @@ fn main() {
+@@ -169,19 +166,8 @@ fn main() {
                  "Thread must have permissions to run with realtime priority, run as root user"
              );
  
@@ -459,16 +478,16 @@ index c83dd8c..333adb3 100644
  
              let (camera_handshake_channel_tx, camera_handshake_channel_rx) = channel();
              let (restart_rp2040_channel_tx, restart_rp2040_channel_rx) = channel();
-@@ -200,7 +185,7 @@ fn main() {
+@@ -198,7 +184,7 @@ fn main() {
                  restart_rp2040_channel_rx,
                  camera_handshake_channel_rx,
                  serve_frames_via_wifi,
 -                run_pin,
 +                rp2040_control,
-                 restart_rp2040_ack.clone(),
                  &recording_state,
                  medium_power_mode.clone(),
-@@ -220,7 +205,7 @@ fn main() {
+             );
+@@ -217,7 +203,7 @@ fn main() {
              enter_camera_transfer_loop(
                  initial_config,
                  dbus_conn,
@@ -478,7 +497,7 @@ index c83dd8c..333adb3 100644
                  restart_rp2040_channel_tx,
                  sig_term_clone,
 diff --git a/src/mode_config.rs b/src/mode_config.rs
-index fcd79d4..3db193f 100644
+index fe35a06..fd44bd9 100644
 --- a/src/mode_config.rs
 +++ b/src/mode_config.rs
 @@ -1,4 +1,5 @@
@@ -487,20 +506,38 @@ index fcd79d4..3db193f 100644
  
  fn default_spi_speed_mhz() -> u32 {
      12
-@@ -15,4 +16,8 @@ pub struct ModeConfig {
-     /// raspberry pi SPI speed in Mhz, defaults to 12
-     #[argh(option, default = "default_spi_speed_mhz()")]
-     pub(crate) spi_speed_mhz: u32,
+@@ -20,4 +21,8 @@ pub struct ModeConfig {
+     /// medium power streaming, rather than telling it to erase them
+     #[argh(switch)]
+     pub(crate) offload_medium_power_duplicates: bool,
 +
 +    /// talk to an emulated RP2040 over this socket or device instead of SPI and GPIO
 +    #[argh(option)]
 +    pub(crate) rp2040_link: Option<PathBuf>,
  }
 diff --git a/src/program_rp2040.rs b/src/program_rp2040.rs
-index 2760fb0..b1156aa 100644
+index 1763f37..26c5d25 100644
 --- a/src/program_rp2040.rs
 +++ b/src/program_rp2040.rs
-@@ -109,12 +109,19 @@ pub fn erase_rp2040_flash_and_exit() -> ! {
+@@ -131,7 +131,16 @@ pub fn offload_erase_requested() -> bool {
+ /// Erases the rp2040 2Gb SPI flash, removes the offload_erase file and exits.
+ /// `tc2-hat-rp2040 --erase-flash` creates /etc/cacophony/program_rp2040, so the normal
+ /// firmware is programmed back on when tc2-agent restarts.
+-pub fn erase_rp2040_flash_and_exit() -> ! {
++pub fn erase_rp2040_flash_and_exit(emulated_rp2040: bool) -> ! {
++    if emulated_rp2040 {
++        // An emulated RP2040 has no SWD to erase over; its files were still offloaded.
++        info!("Not erasing emulated RP2040 flash");
++        if let Err(e) = fs::remove_file(OFFLOAD_ERASE_FILE) {
++            error!("Failed to remove '{OFFLOAD_ERASE_FILE}': {e}");
++            process::exit(1);
++        }
++        process::exit(0);
++    }
+     info!("All files offloaded, erasing rp2040 2Gb SPI flash");
+     let result = {
+         // Same as programming, the erase needs the SWD pins to itself.
+@@ -158,12 +167,19 @@ pub fn erase_rp2040_flash_and_exit() -> ! {
      }
  }
  

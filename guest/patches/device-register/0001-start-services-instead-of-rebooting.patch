@@ -107,10 +107,10 @@ index da361e8..d2a74ff 100644
  
 diff --git a/cmd/device-register/services.go b/cmd/device-register/services.go
 new file mode 100644
-index 0000000..1ace2cc
+index 0000000..929906d
 --- /dev/null
 +++ b/cmd/device-register/services.go
-@@ -0,0 +1,112 @@
+@@ -0,0 +1,137 @@
 +// device-register - helper for registering and renaming cacophony devices
 +//  Copyright (C) 2026, The Cacophony Project
 +//
@@ -153,7 +153,19 @@ index 0000000..1ace2cc
 +	if len(wanted) == 0 {
 +		return nil
 +	}
-+	showArgs := append([]string{"show", "--property=Id,LoadState,ActiveState,SubState,ConditionResult"}, wanted...)
++	// Only inactive or restarting units can need starting, and listing those first
++	// is much cheaper than showing every wanted unit: the guest spends ~1s on
++	// `systemctl show` for all ~50 of them, more while everything else starts.
++	listArgs := append([]string{"list-units", "--all", "--plain", "--no-legend", "--state=inactive,auto-restart"}, wanted...)
++	out, err = exec.Command("systemctl", listArgs...).Output()
++	if err != nil {
++		return fmt.Errorf("listing inactive services: %w", err)
++	}
++	candidates := listedUnits(string(out))
++	if len(candidates) == 0 {
++		return nil
++	}
++	showArgs := append([]string{"show", "--property=Id,LoadState,ActiveState,SubState,ConditionResult"}, candidates...)
 +	out, err = exec.Command("systemctl", showArgs...).Output()
 +	if err != nil {
 +		return fmt.Errorf("reading service states: %w", err)
@@ -206,6 +218,19 @@ index 0000000..1ace2cc
 +	return nil
 +}
 +
++// listedUnits returns the unit names from `systemctl list-units --plain
++// --no-legend` output, the first field of each line, after any status mark.
++func listedUnits(out string) []string {
++	var units []string
++	for _, line := range strings.Split(out, "\n") {
++		fields := strings.Fields(strings.TrimLeft(line, "● *"))
++		if len(fields) > 0 {
++			units = append(units, fields[0])
++		}
++	}
++	return units
++}
++
 +// parseUnits parses the output of `systemctl show` for several units: a block of
 +// key=value lines for each, separated by blank lines.
 +func parseUnits(out string) []map[string]string {
@@ -222,4 +247,30 @@ index 0000000..1ace2cc
 +		}
 +	}
 +	return units
++}
+diff --git a/cmd/device-register/services_test.go b/cmd/device-register/services_test.go
+new file mode 100644
+index 0000000..bea42c1
+--- /dev/null
++++ b/cmd/device-register/services_test.go
+@@ -0,0 +1,20 @@
++package main
++
++import (
++	"reflect"
++	"testing"
++)
++
++func TestListedUnits(t *testing.T) {
++	out := "device-register.service              loaded inactive dead Cacophony device register service\n" +
++		"hostapd.service                      masked inactive dead hostapd.service\n" +
++		"● foo.service                        not-found inactive dead foo.service\n" +
++		"\n"
++	want := []string{"device-register.service", "hostapd.service", "foo.service"}
++	if got := listedUnits(out); !reflect.DeepEqual(got, want) {
++		t.Errorf("listedUnits() = %q, want %q", got, want)
++	}
++	if got := listedUnits(""); got != nil {
++		t.Errorf("listedUnits(\"\") = %q, want none", got)
++	}
 +}

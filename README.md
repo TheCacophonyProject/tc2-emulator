@@ -233,7 +233,9 @@ that build for the affected service only. Released software is patched at the
 version in `guest/versions/packages.txt`, so it matches the rest of the image:
 
 - `tc2-agent` (`scripts/build-tc2-agent.sh`): `--rp2040-link <path>` talks to
-  an emulated RP2040 over a socket instead of SPI and GPIO, and never programs it.
+  an emulated RP2040 over a socket instead of SPI and GPIO, and never programs it
+  or erases its flash (the package's postinst requests an offload + erase; the
+  offload still happens).
   The socket protocol is described in the patch's `src/rp2040_link.rs`. It's built
   with the tc2-firmware release its release workflow sets, whose firmware version
   `tc2-emu-rp2040` must report (`FIRMWARE_VERSION`).
