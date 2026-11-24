@@ -256,8 +256,22 @@ The Rust workspace in `crates/` stands in for the TC2 HAT:
   Lepton holds the first frame of `fixtures/cat-trigger.cptv`. It records to its
   emulated flash and offloads to tc2-agent as on a device, and in high power mode
   streams frames for thermal-recorder. Outside its recording window it has the Pi
-  power off, which stops the emulator for now; the e2e tests set an always-on
-  window. `TC2_RP2040=scripted` runs `tc2-emu-rp2040`, a scripted stand-in that
+  power off; the e2e tests set an always-on window to keep it up. QEMU runs with
+  `-no-shutdown`, so a powered off guest leaves the container running with the
+  Pi's power cut, as the ATtiny does, and `tc2-emu-hw` resets the guest (a power
+  on) when the RP2040's request for the Pi (ATtiny register 0x05 bit 0) is set again
+  after the shutdown. `PATCH /attiny` with `rp2040_wants_pi_on` does the same by hand.
+  When the firmware tells the ATtiny to power it down (register 0x05 = 2, once the Pi
+  is off and it's outside its window), `tc2-emu-hw` models the PCF8563's alarm and
+  keeps the RP2040 off the I2C bus until the RTC reaches it, so the firmware restarts
+  and wakes the Pi at its next recording window as on a device. With time warp
+  (`TC2_TIME_WARP=1`, or `PUT /time-warp` on the control API at port 9000) the RTC
+  jumps to the alarm as soon as both the Pi and the RP2040 are off, rather than
+  waiting for it. `TC2_START_TIME=HH:MM` (UTC) starts the RTC at the next such
+  time of day from now (never behind real time, as the API files recordings by their
+  time), and `make e2e` sets it from `E2E_START_TIME` (default 00:00,
+  midday in NZ) so the tests don't depend on the time of day they run at.
+  `TC2_RP2040=scripted` runs `tc2-emu-rp2040`, a scripted stand-in that
   only makes the startup handshake and streams flat frames, instead.
 - With `TC2_AGENT=stand-in`, `tc2-emu-agent` replaces `tc2-agent`. It serves the
   `org.cacophony.TC2Agent` methods managementd uses, with tc2-agent's

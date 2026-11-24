@@ -20,6 +20,11 @@ pub fn managementd_url() -> String {
     std::env::var("TC2_E2E_MANAGEMENTD").unwrap_or_else(|_| "http://localhost:8080".into())
 }
 
+/// The emulated hardware's control API (tc2-emu-hw).
+pub fn hardware_url() -> String {
+    std::env::var("TC2_E2E_HW").unwrap_or_else(|_| "http://localhost:9000".into())
+}
+
 /// A unique name like cacophony-web's getTestName, e.g. `tc2-emu_user-k3j9x2`.
 pub fn test_name(kind: &str) -> String {
     format!("tc2-emu_{kind}-{:x}", rand::random::<u32>())
@@ -471,14 +476,57 @@ impl TestDevice {
     }
 }
 
-/// An `updated` time for a settings section as the web portal makes it.
+/// An `updated` time for a settings section as the web portal makes it. It's the
+/// device's time, not the host's: the emulated clock starts at a fixed time of day
+/// (`TC2_START_TIME`), hours ahead of the host's, and config sync takes the newer
+/// change, so a portal change stamped with the host's time would look older than the
+/// device's. (It's the host's if the hardware API can't be reached.)
 pub fn now_iso() -> String {
-    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+    Hardware::rtc_now()
+        .unwrap_or_else(|_| chrono::Utc::now())
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
 /// A shell in the emulated guest over SSH, as `make ssh` gives. `TC2_E2E_SSH` is the
 /// `host:port` to reach the guest's SSH on (default `localhost:2222`) and
 /// `TC2_E2E_SSH_KEY` the test key (default `images/id_ed25519`).
+/// The emulated HAT's control API, for what a test does to the hardware, or reads from
+/// it, without going through the guest.
+pub struct Hardware;
+
+impl Hardware {
+    pub fn state() -> anyhow::Result<Value> {
+        send_json(Client::new().get(format!("{}/state", hardware_url())))
+    }
+
+    /// While the Pi and the RP2040 are both off, the RTC jumps to its alarm rather than
+    /// waiting for it.
+    pub fn set_time_warp(enabled: bool) -> anyhow::Result<()> {
+        send_json::<Value>(
+            Client::new()
+                .put(format!("{}/time-warp", hardware_url()))
+                .json(&json!({ "enabled": enabled })),
+        )?;
+        Ok(())
+    }
+
+    /// The RTC's time.
+    pub fn rtc_now() -> anyhow::Result<chrono::DateTime<chrono::Utc>> {
+        let state = Self::state()?;
+        let time = state["rtc"]["time"].as_str().context("no RTC time in the state")?;
+        Ok(chrono::DateTime::parse_from_rfc3339(time)?.with_timezone(&chrono::Utc))
+    }
+
+    /// The RTC's time, as epoch seconds.
+    pub fn rtc_time() -> anyhow::Result<i64> {
+        Ok(Self::rtc_now()?.timestamp())
+    }
+
+    pub fn pi_is_off() -> anyhow::Result<bool> {
+        Ok(Self::state()?["pi_off"].as_bool().unwrap_or_default())
+    }
+}
+
 pub struct Guest;
 
 impl Guest {

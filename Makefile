@@ -176,17 +176,20 @@ E2E_HOST := http://host.docker.internal
 # The tests share the one emulated device, so they run one at a time, in this
 # order: new_device_setup needs the device as it first registers, and the others
 # move it to a group of their own.
-E2E_TESTS := new_device_setup rp2040_test_recording config_sync power_mode classify
+# The emulated RTC starts at this time of day (UTC; 00:00 is midday in NZ), so the
+# results don't depend on when the tests run.
+E2E_START_TIME ?= 00:00
+E2E_TESTS := new_device_setup rp2040_test_recording config_sync power_mode classify power_cycle
 # cacophony-config-sync waits only 100ms after config changes, rather than 10s.
 # ssh, which the tests use to run commands in the guest, needs the user the container
 # runs as (the host user's id) to be in /etc/passwd.
 e2e: build stubs
 	mkdir -p target/docker
 	printf 'root:x:0:0:root:/root:/bin/sh\ntc2:x:%s:%s::/tmp:/bin/sh\n' $(shell id -u) $(shell id -g) > target/docker/passwd
-	TC2_CONFIG_SYNC_DELAY=100ms TC2_AUTOLOGIN=0 docker compose up -d --force-recreate
+	TC2_START_TIME=$(E2E_START_TIME) TC2_CONFIG_SYNC_DELAY=100ms TC2_AUTOLOGIN=0 docker compose up -d --force-recreate
 	$(DOCKER_RUN) --add-host host.docker.internal:host-gateway -v $(CURDIR)/target/docker/passwd:/etc/passwd:ro \
 		-e TC2_E2E_API=$(E2E_HOST):1080 -e TC2_E2E_MANAGEMENTD=$(E2E_HOST):8080 \
-		-e TC2_E2E_SSH=host.docker.internal:2222 -e TC2_E2E_SSH_KEY=/src/images/id_ed25519 \
+		-e TC2_E2E_HW=$(E2E_HOST):9000 -e TC2_E2E_SSH=host.docker.internal:2222 -e TC2_E2E_SSH_KEY=/src/images/id_ed25519 \
 		-e CARGO_HOME=/src/target/docker/cargo-home -e CARGO_TARGET_DIR=/src/target/docker \
 		tc2-emu-stubs-builder sh -ec 'for test in $(E2E_TESTS); do \
 			cargo test -p tc2-emu-e2e --test $$test -- --ignored --nocapture --test-threads=1; done'

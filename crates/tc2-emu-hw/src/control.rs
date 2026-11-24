@@ -7,6 +7,8 @@
 //! - `PATCH /attiny` with any of the fields of [`attiny::Inputs`]
 //! - `PATCH /aht20` with any of the fields of [`aht20::Inputs`]
 //! - `PUT /rtc/time` with `{"time": "<RFC 3339>"}`
+//! - `PUT /time-warp` with `{"enabled": true}`: while the Pi and the RP2040 are both
+//!   powered off, the RTC jumps to its alarm instead of waiting for it
 
 use crate::hat::{Hat, State};
 use crate::{aht20, attiny};
@@ -28,6 +30,7 @@ pub fn router(hat: SharedHat) -> Router {
         .route("/attiny", patch(patch_attiny))
         .route("/aht20", patch(patch_aht20))
         .route("/rtc/time", put(put_rtc_time))
+        .route("/time-warp", put(put_time_warp))
         .with_state(hat)
 }
 
@@ -43,6 +46,7 @@ device's management interface is on <a href="http://localhost:8080">port 8080</a
 <li><code>PATCH /attiny</code>: JSON with any of the ATtiny inputs, e.g. <code>{"hv_battery_volts": 11.2}</code></li>
 <li><code>PATCH /aht20</code>: JSON with any of the AHT20 inputs, e.g. <code>{"temperature_celsius": 35}</code></li>
 <li><code>PUT /rtc/time</code>: <code>{"time": "2027-01-01T09:00:00Z"}</code></li>
+<li><code>PUT /time-warp</code>: <code>{"enabled": true}</code>, to skip the time the Pi and RP2040 are both off</li>
 </ul>
 </body>
 "#;
@@ -86,5 +90,16 @@ struct RtcTime {
 async fn put_rtc_time(Shared(hat): Shared<SharedHat>, Json(body): Json<RtcTime>) -> Json<State> {
     let mut hat = hat.lock().unwrap();
     hat.rtc.set_time(body.time);
+    Json(hat.state())
+}
+
+#[derive(Deserialize)]
+struct TimeWarp {
+    enabled: bool,
+}
+
+async fn put_time_warp(Shared(hat): Shared<SharedHat>, Json(body): Json<TimeWarp>) -> Json<State> {
+    let mut hat = hat.lock().unwrap();
+    hat.time_warp = body.enabled;
     Json(hat.state())
 }

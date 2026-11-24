@@ -1,0 +1,52 @@
+diff --git a/src/piclassifier/extraservices.py b/src/piclassifier/extraservices.py
+index 808dad4d..60c39405 100644
+--- a/src/piclassifier/extraservices.py
++++ b/src/piclassifier/extraservices.py
+@@ -1,8 +1,13 @@
+ import logging
+-from multiprocessing import Process
++import multiprocessing
+ 
+ from piclassifier import utils
+ 
++# Services are spawned, not forked: a restart happens from the watchdog thread while other
++# threads are running, and a forked child inherits any lock one of them holds (such as the one
++# on stderr while it logs) with nobody to release it, so it blocks forever on its first log.
++_ctx = multiprocessing.get_context("spawn")
++
+ 
+ # saves import in main process
+ def _postprocess_main(parse_incomplete, only_new_files, exit_event):
+@@ -16,7 +21,7 @@ def _postprocess_main(parse_incomplete, only_new_files, exit_event):
+ 
+ 
+ def run_postprocess(parse_incomplete=True, only_new_files=False, exit_event=None):
+-    p_processor = Process(
++    p_processor = _ctx.Process(
+         target=_postprocess_main,
+         args=(
+             parse_incomplete,
+@@ -35,7 +40,7 @@ def _classifier_main():
+ 
+ 
+ def run_classifier():
+-    p_processor = Process(
++    p_processor = _ctx.Process(
+         target=_classifier_main,
+         args=(),
+     )
+@@ -47,8 +52,13 @@ def start_service(start_fn):
+     return {"process": start_fn(), "start_fn": start_fn}
+ 
+ 
++# Checking is just is_alive() on each service, so check often: until a dead service is
++# restarted nothing is classified.
++WATCH_INTERVAL_SECONDS = 10
++
++
+ def watch_services(services, stop_event):
+-    while not stop_event.wait(5 * 60):
++    while not stop_event.wait(WATCH_INTERVAL_SECONDS):
+         for service in services:
+             process = service["process"]
+             if not process.is_alive():

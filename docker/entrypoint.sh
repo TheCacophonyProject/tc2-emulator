@@ -92,4 +92,5 @@ exec qemu-system-aarch64 \
     -device virtserialport,chardev=journal,name=org.cacophony.tc2-emu.journal \
     -virtfs local,path="$EMU",mount_tag=tc2-emu,security_model=none,readonly=on \
     -display none -serial mon:stdio \
-    -qmp unix:"$STATE/qmp.sock",server=on,wait=off
+    -qmp unix:"$STATE/qmp.sock",server=on,wait=off \
+    -no-shutdown

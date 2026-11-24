@@ -290,10 +290,10 @@ index 0000000..0cf975b
 +}
 diff --git a/src/emulator/link.rs b/src/emulator/link.rs
 new file mode 100644
-index 0000000..2b958da
+index 0000000..8dd54b0
 --- /dev/null
 +++ b/src/emulator/link.rs
-@@ -0,0 +1,523 @@
+@@ -0,0 +1,551 @@
 +//! The RP2040 end of tc2-agent's emulated link (`--rp2040-link`, see tc2-agent's
 +//! rp2040_link.rs), standing in for the ping line, the SPI bus and the run pin.
 +//! tc2-agent is the SPI master, so the RP2040 only answers it. Each message is
@@ -322,6 +322,7 @@ index 0000000..2b958da
 +use byteorder::{ByteOrder, LittleEndian};
 +use log::{debug, info, warn};
 +use std::io::{Read, Write};
++use std::net::Shutdown;
 +use std::os::unix::net::UnixStream;
 +use std::path::PathBuf;
 +use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
@@ -350,6 +351,14 @@ index 0000000..2b958da
 +/// A gap between tc2-agent's reads this long ends the transfer, as the firmware
 +/// aborts a stalled DMA transfer.
 +const STALL_TIMEOUT: Duration = Duration::from_millis(500);
++
++/// How long a write to tc2-agent may block. QEMU stops reading the port while the guest
++/// is off (it runs with `-no-shutdown`, paused), so once the buffers fill a write would
++/// block for good, and the firmware with it, when it should find out the Pi is gone.
++#[cfg(not(test))]
++const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
++#[cfg(test)]
++const WRITE_TIMEOUT: Duration = Duration::from_millis(200);
 +
 +pub struct Link {
 +    /// The current connection's write half, if connected.
@@ -526,7 +535,14 @@ index 0000000..2b958da
 +    LittleEndian::write_u32(&mut length, payload.len() as u32);
 +    message.extend_from_slice(&length);
 +    message.extend_from_slice(payload);
-+    stream.write_all(&message).is_ok()
++    if stream.write_all(&message).is_ok() {
++        return true;
++    }
++    // Part of the message may have been written, so the connection can't be used
++    // again: close it, which has the reader connect afresh.
++    let _ = stream.shutdown(Shutdown::Both);
++    *writer = None;
++    false
 +}
 +
 +/// Reads tc2-agent's messages from the socket for [`Link`].
@@ -552,6 +568,7 @@ index 0000000..2b958da
 +                "Connected to the guest's rp2040 port at {}",
 +                socket.display()
 +            );
++            let _ = stream.set_write_timeout(Some(WRITE_TIMEOUT));
 +            *self.writer.lock().unwrap() = stream.try_clone().ok();
 +            while let Some((kind, payload)) = read_message(&mut stream) {
 +                if !self.handle(kind, payload) {
@@ -815,6 +832,17 @@ index 0000000..2b958da
 +        let started = Instant::now();
 +        assert!(!link.ping(Duration::from_secs(5)));
 +        assert!(started.elapsed() < Duration::from_secs(1));
++    }
++
++    #[test]
++    fn a_write_that_blocks_closes_the_connection() {
++        // An agent that doesn't read, as with the Pi powered off and QEMU stopped.
++        let (mut link, _agent) = connected();
++        let started = Instant::now();
++        assert!(!link.send(DATA, &std::vec![0u8; 16 << 20]));
++        assert!(started.elapsed() < Duration::from_secs(5));
++        assert!(link.writer.lock().unwrap().is_none());
++        assert!(!link.ping(Duration::from_secs(5)), "and pings fail at once");
 +    }
 +}
 diff --git a/src/emulator/mod.rs b/src/emulator/mod.rs

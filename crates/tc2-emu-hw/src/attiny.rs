@@ -40,6 +40,10 @@ const REGISTER_COUNT: usize = 0x31;
 /// Power-on reset, the only reset the emulated ATtiny has had.
 const POWER_ON_RESET: u8 = 0x01;
 const READ_ONLY: [u8; 4] = [reg::TYPE, reg::MAJOR_VERSION, reg::MINOR_VERSION, reg::PATCH_VERSION];
+const CAMERA_POWERING_ON: u8 = 0x00;
+const CAMERA_POWERED_OFF: u8 = 0x03;
+/// Written to the power control register by the RP2040 to have the ATtiny power it down.
+const SLEEP_RP2040: u8 = 0x02;
 /// Writing this bit to the first register of a battery pair starts an analog
 /// reading; the ATtiny clears it when the reading is ready.
 const ANALOG_START: u8 = 1 << 7;
@@ -115,6 +119,7 @@ pub struct State {
 pub struct Attiny {
     regs: [u8; REGISTER_COUNT],
     inputs: Inputs,
+    sleep_requested: bool,
 }
 
 impl Attiny {
@@ -128,7 +133,7 @@ impl Attiny {
         regs[reg::BOOT_DURATION_1 as usize] = hi;
         regs[reg::BOOT_DURATION_2 as usize] = lo;
         regs[reg::RESET_FLAGS as usize] = POWER_ON_RESET;
-        let mut attiny = Attiny { regs, inputs: Inputs::default() };
+        let mut attiny = Attiny { regs, inputs: Inputs::default(), sleep_requested: false };
         attiny.apply_inputs();
         attiny
     }
@@ -141,6 +146,25 @@ impl Attiny {
             pi_commands: self.regs[reg::PI_COMMANDS as usize],
             tc2_agent_state: self.regs[reg::TC2_AGENT_STATE as usize],
         }
+    }
+
+    /// Bit 0 of register 0x05, which the RP2040 writes (and tests set through the
+    /// inputs): whether it wants the Pi powered.
+    pub fn rp2040_wants_pi_on(&self) -> bool {
+        self.regs[reg::RP2040_PI_POWER_CTRL as usize] & 0x01 != 0
+    }
+
+    /// The Pi's power was cut or restored. The ATtiny reports it in the camera state,
+    /// which the Pi's tc2-hat-attiny sets to `PoweredOn` once it has started.
+    pub fn set_pi_powered(&mut self, on: bool) {
+        self.regs[reg::CAMERA_STATE as usize] = if on { CAMERA_POWERING_ON } else { CAMERA_POWERED_OFF };
+    }
+
+    /// Whether the RP2040 has written `SleepRP2040` (2) to the power control register
+    /// since this was last called: the ATtiny then cuts the RP2040's power until the
+    /// RTC's alarm.
+    pub fn take_sleep_request(&mut self) -> bool {
+        std::mem::take(&mut self.sleep_requested)
     }
 
     pub fn update_inputs(&mut self, patch: InputsPatch) {
@@ -222,6 +246,9 @@ impl Attiny {
                 return;
             }
         }
+        if register == reg::RP2040_PI_POWER_CTRL && value == SLEEP_RP2040 {
+            self.sleep_requested = true;
+        }
         self.regs[register as usize] = value;
     }
 }
@@ -247,9 +274,9 @@ mod tests {
         let mut attiny = Attiny::new();
         assert_eq!(attiny.tx(&[reg::TYPE], 1).unwrap(), vec![TYPE_VALUE]);
         assert_eq!(read_register(&mut attiny, reg::TYPE), TYPE_VALUE);
-        assert_eq!(read_register(&mut attiny, reg::MAJOR_VERSION), 1);
-        assert_eq!(read_register(&mut attiny, reg::MINOR_VERSION), 0);
-        assert_eq!(read_register(&mut attiny, reg::PATCH_VERSION), 10);
+        assert_eq!(read_register(&mut attiny, reg::MAJOR_VERSION), FIRMWARE_VERSION.0);
+        assert_eq!(read_register(&mut attiny, reg::MINOR_VERSION), FIRMWARE_VERSION.1);
+        assert_eq!(read_register(&mut attiny, reg::PATCH_VERSION), FIRMWARE_VERSION.2);
         assert_eq!(read_register(&mut attiny, reg::RESET_FLAGS), POWER_ON_RESET);
     }
 
