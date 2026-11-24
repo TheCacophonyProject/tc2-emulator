@@ -1,0 +1,16 @@
+diff --git a/_releases/tc2-agent.service b/_releases/tc2-agent.service
+index 35df41f..9562840 100644
+--- a/_releases/tc2-agent.service
++++ b/_releases/tc2-agent.service
+@@ -2,9 +2,9 @@
+ Description=Cacophony Project TC2 Agent
+ ConditionPathExists=/etc/salt/minion_id
+ DefaultDependencies=no
+-Wants=network-pre.target
++Wants=network-pre.target tc2-hat-i2c.service
+ Before=network-pre.target 
+-After=local-fs.target systemd-modules-load.service dbus.socket
++After=local-fs.target systemd-modules-load.service dbus.socket tc2-hat-i2c.service
+ Requires=dbus.socket
+ 
+ [Service]
