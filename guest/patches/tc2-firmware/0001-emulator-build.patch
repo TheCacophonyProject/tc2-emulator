@@ -114,6 +114,109 @@ index 942a056..7c9752f 100644
  std = [
      "dep:serde",
      "dep:louvre",
+diff --git a/src/emulator/control.rs b/src/emulator/control.rs
+new file mode 100644
+index 0000000..5280642
+--- /dev/null
++++ b/src/emulator/control.rs
+@@ -0,0 +1,97 @@
++//! The firmware emulator's control port, for tests to change what the Lepton sees. A
++//! line protocol over TCP, one request and one reply a line:
++//!
++//! - `scenes`: the scenes' names, separated by spaces
++//! - `play NAME`: show the scene, then go back to the held frame
++//! - `hold`: go back to the held frame now
++//! - `status`: `hold`, `entering NAME` or `playing NAME`
++
++extern crate std;
++use super::lepton::{Request, SharedControl};
++use log::{info, warn};
++use std::format;
++use std::io::{BufRead, BufReader, Write};
++use std::net::TcpListener;
++use std::string::{String, ToString};
++use std::thread;
++
++pub fn serve(address: &str, control: SharedControl) -> std::io::Result<()> {
++    let listener = TcpListener::bind(address)?;
++    info!("Control port on {address}");
++    thread::spawn(move || {
++        for stream in listener.incoming() {
++            let Ok(stream) = stream else { continue };
++            let control = control.clone();
++            thread::spawn(move || {
++                let Ok(mut writer) = stream.try_clone() else { return };
++                for line in BufReader::new(stream).lines() {
++                    let Ok(line) = line else { return };
++                    let reply = reply_to(&line, &control);
++                    if writeln!(writer, "{reply}").is_err() {
++                        return;
++                    }
++                }
++            });
++        }
++    });
++    Ok(())
++}
++
++fn reply_to(line: &str, control: &SharedControl) -> String {
++    let mut control = control.lock().unwrap();
++    match line.trim().split_once(' ').unwrap_or((line.trim(), "")) {
++        ("scenes", _) => control.scenes.join(" "),
++        ("status", _) => control.status.clone(),
++        ("hold", _) => {
++            control.request = Some(Request::Hold);
++            "ok".to_string()
++        }
++        ("play", name) if control.scenes.iter().any(|scene| scene == name) => {
++            control.request = Some(Request::Play(name.to_string()));
++            "ok".to_string()
++        }
++        ("play", name) => format!("error: no scene {name:?}"),
++        _ => {
++            warn!("Control port: unknown request {line:?}");
++            format!("error: unknown request {line:?}")
++        }
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use std::io::Read;
++    use std::net::TcpStream;
++
++    fn ask(stream: &mut TcpStream, request: &str) -> String {
++        writeln!(stream, "{request}").unwrap();
++        let mut reply = std::vec::Vec::new();
++        let mut byte = [0u8; 1];
++        while stream.read_exact(&mut byte).is_ok() && byte[0] != b'\n' {
++            reply.push(byte[0]);
++        }
++        String::from_utf8(reply).unwrap()
++    }
++
++    #[test]
++    fn requests_reach_the_lepton() {
++        let control = SharedControl::default();
++        control.lock().unwrap().scenes = std::vec!["cat".to_string(), "dog".to_string()];
++        control.lock().unwrap().status = "hold".to_string();
++        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
++        let address = listener.local_addr().unwrap().to_string();
++        drop(listener);
++        serve(&address, control.clone()).unwrap();
++        let mut stream = TcpStream::connect(&address).unwrap();
++
++        assert_eq!(ask(&mut stream, "scenes"), "cat dog");
++        assert_eq!(ask(&mut stream, "status"), "hold");
++        assert_eq!(ask(&mut stream, "play cat"), "ok");
++        assert_eq!(control.lock().unwrap().request, Some(Request::Play("cat".into())));
++        assert!(ask(&mut stream, "play bird").starts_with("error"));
++        assert_eq!(ask(&mut stream, "hold"), "ok");
++        assert_eq!(control.lock().unwrap().request, Some(Request::Hold));
++        assert!(ask(&mut stream, "nonsense").starts_with("error"));
++    }
++}
 diff --git a/src/emulator/hw.rs b/src/emulator/hw.rs
 new file mode 100644
 index 0000000..b44941b
@@ -208,41 +311,104 @@ index 0000000..b44941b
 +}
 diff --git a/src/emulator/lepton.rs b/src/emulator/lepton.rs
 new file mode 100644
-index 0000000..0cf975b
+index 0000000..689017d
 --- /dev/null
 +++ b/src/emulator/lepton.rs
-@@ -0,0 +1,76 @@
-+//! The Lepton, in real time: a frame every 115ms (about 8.7 per second). For now it
-+//! holds one frame: the first of a CPTV file, or a flat one.
+@@ -0,0 +1,316 @@
++//! The Lepton, in real time: a frame every 115ms (about 8.7 per second).
++//!
++//! It holds one frame, the first of a CPTV file or a flat one, so that nothing moves
++//! and nothing is detected. Scenes are CPTV files that can be played on request: the
++//! frame shown moves to the scene's first frame, plays the scene, and moves back to
++//! the held frame. The moves are cross-fades that change no pixel by more than
++//! [`MAX_STEP`] a frame, so that switching never looks like motion to the firmware
++//! (which sees a change of over 50 raw units on a few pixels), or to thermal-recorder.
 +
 +extern crate std;
 +use crate::frame_processing::FrameBuffer;
 +use crate::tests::mocks::bsp::hal::sio::write_lepton_frame;
 +use codec::decode::{CptvDecoder, CptvFrame};
++use log::info;
++use std::collections::BTreeMap;
 +use std::format;
 +use std::path::Path;
-+use std::string::String;
++use std::string::{String, ToString};
++use std::sync::{Arc, Mutex};
 +use std::thread;
 +use std::time::{Duration, Instant};
++use std::vec::Vec;
 +
 +const FRAME_INTERVAL: Duration = Duration::from_millis(115);
 +/// Raw value of the flat frame, about 17°C for a radiometric Lepton 3.5 (centikelvin).
 +const FLAT_FRAME_VALUE: u16 = 29_000;
++/// The most a pixel changes in a frame while moving between the held frame and a scene:
++/// 0.2°C, a fraction of what the firmware takes for motion.
++const MAX_STEP: u16 = 20;
++
++/// What the control port asks of the Lepton, taken at the next frame.
++#[derive(Clone, Debug, PartialEq)]
++pub enum Request {
++    Play(String),
++    Hold,
++}
++
++/// Shared between the Lepton and the control port.
++#[derive(Default)]
++pub struct Control {
++    pub request: Option<Request>,
++    /// The scenes' names, for the control port to check requests against.
++    pub scenes: Vec<String>,
++    /// What the Lepton is showing, for the control port to report.
++    pub status: String,
++}
++
++pub type SharedControl = Arc<Mutex<Control>>;
++
++enum Mode {
++    /// Showing (or moving to) the held frame.
++    Hold,
++    /// Moving to the first frame of the scene, which is then played.
++    Entering { scene: String },
++    /// Playing the scene's frames; `next` is the one to show next.
++    Playing { scene: String, next: usize },
++}
 +
 +pub struct Lepton {
-+    frame: CptvFrame,
++    held: CptvFrame,
++    scenes: BTreeMap<String, Vec<CptvFrame>>,
++    /// The frame being shown, whose header fields are the held frame's.
++    shown: CptvFrame,
++    mode: Mode,
++    control: SharedControl,
 +    frame_num: u32,
 +    next_frame: Instant,
 +}
 +
 +impl Lepton {
-+    pub fn new(cptv: Option<&Path>) -> Result<Lepton, String> {
-+        let frame = match cptv {
++    pub fn new(
++        cptv: Option<&Path>,
++        scenes_dir: Option<&Path>,
++        control: SharedControl,
++    ) -> Result<Lepton, String> {
++        let held = match cptv {
 +            Some(path) => first_frame(path)?,
 +            None => flat_frame(),
 +        };
++        let scenes = match scenes_dir {
++            Some(dir) => load_scenes(dir)?,
++            None => BTreeMap::new(),
++        };
++        {
++            let mut control = control.lock().unwrap();
++            control.scenes = scenes.keys().cloned().collect();
++            control.status = "hold".to_string();
++        }
 +        Ok(Lepton {
-+            frame,
++            shown: held.clone(),
++            held,
++            scenes,
++            mode: Mode::Hold,
++            control,
 +            frame_num: 0,
 +            next_frame: Instant::now(),
 +        })
@@ -261,9 +427,71 @@ index 0000000..0cf975b
 +    }
 +
 +    pub fn copy_frame(&mut self, frame_buffer: &mut FrameBuffer) {
-+        write_lepton_frame(frame_buffer, &self.frame, self.frame_num, false);
++        self.step();
++        write_lepton_frame(frame_buffer, &self.shown, self.frame_num, false);
 +        self.frame_num += 1;
 +    }
++
++    /// Moves what's shown on by a frame.
++    fn step(&mut self) {
++        let request = self.control.lock().unwrap().request.take();
++        match request {
++            Some(Request::Play(scene)) if self.scenes.contains_key(&scene) => {
++                info!("Scene {scene}");
++                self.mode = Mode::Entering { scene };
++            }
++            Some(Request::Play(scene)) => info!("No scene {scene}"),
++            Some(Request::Hold) => {
++                info!("Holding the frame");
++                self.mode = Mode::Hold;
++            }
++            None => {}
++        }
++        match &mut self.mode {
++            Mode::Hold => {
++                let held = self.held.image_data.data();
++                move_towards(&mut self.shown, held);
++            }
++            Mode::Entering { scene } => {
++                let first = self.scenes[scene.as_str()][0].image_data.data();
++                if move_towards(&mut self.shown, first) {
++                    let scene = scene.clone();
++                    self.mode = Mode::Playing { scene, next: 0 };
++                }
++            }
++            Mode::Playing { scene, next } => {
++                let frames = &self.scenes[scene.as_str()];
++                // The scene's own frames, which move as the scene does. Its header
++                // fields stay the held frame's, as the Lepton's don't change.
++                self.shown.image_data = frames[*next].image_data.clone();
++                *next += 1;
++                if *next >= frames.len() {
++                    info!("Scene {scene} done, returning to the held frame");
++                    self.mode = Mode::Hold;
++                }
++            }
++        }
++        let status = match &self.mode {
++            Mode::Hold => "hold".to_string(),
++            Mode::Entering { scene } => format!("entering {scene}"),
++            Mode::Playing { scene, .. } => format!("playing {scene}"),
++        };
++        self.control.lock().unwrap().status = status;
++    }
++}
++
++/// Moves each pixel of `frame` towards `target` by at most [`MAX_STEP`]. True once it's
++/// there.
++fn move_towards(frame: &mut CptvFrame, target: &[u16]) -> bool {
++    let mut arrived = true;
++    for (px, &want) in frame.image_data.view_mut(0, 0, 160, 120).zip(target) {
++        if *px != want {
++            let step = (*px).abs_diff(want).min(MAX_STEP);
++            *px = if *px < want { *px + step } else { *px - step };
++            arrived &= *px == want;
++        }
++    }
++    arrived
 +}
 +
 +fn first_frame(path: &Path) -> Result<CptvFrame, String> {
@@ -279,6 +507,33 @@ index 0000000..0cf975b
 +    }
 +}
 +
++/// Every `*.cptv` in `dir`, by file name without the extension.
++fn load_scenes(dir: &Path) -> Result<BTreeMap<String, Vec<CptvFrame>>, String> {
++    let mut scenes = BTreeMap::new();
++    let entries = std::fs::read_dir(dir).map_err(|e| format!("reading {}: {e}", dir.display()))?;
++    for entry in entries {
++        let path = entry.map_err(|e| e.to_string())?.path();
++        if path.extension().is_none_or(|ext| ext != "cptv") {
++            continue;
++        }
++        let name = path.file_stem().unwrap().to_string_lossy().into_owned();
++        let mut decoder = CptvDecoder::<std::fs::File>::from_path(&path)
++            .map_err(|e| format!("opening {}: {e:?}", path.display()))?;
++        let mut frames = Vec::new();
++        while let Ok(frame) = decoder.next_frame() {
++            if !frame.is_background_frame {
++                frames.push(frame.clone());
++            }
++        }
++        if frames.is_empty() {
++            return Err(format!("{} has no frames", path.display()));
++        }
++        info!("Scene {name}: {} frames", frames.len());
++        scenes.insert(name, frames);
++    }
++    Ok(scenes)
++}
++
 +fn flat_frame() -> CptvFrame {
 +    let mut frame = CptvFrame::new();
 +    for px in frame.image_data.view_mut(0, 0, 160, 120) {
@@ -287,6 +542,94 @@ index 0000000..0cf975b
 +    frame.frame_temp_c = 25.0;
 +    frame.last_ffc_temp_c = 25.0;
 +    frame
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn frame_of(value: u16) -> CptvFrame {
++        let mut frame = flat_frame();
++        for px in frame.image_data.view_mut(0, 0, 160, 120) {
++            *px = value;
++        }
++        frame
++    }
++
++    fn lepton(held: u16, scene: &[u16]) -> Lepton {
++        let control = SharedControl::default();
++        let mut lepton = Lepton {
++            held: frame_of(held),
++            scenes: BTreeMap::from([("scene".to_string(), scene.iter().map(|v| frame_of(*v)).collect())]),
++            shown: frame_of(held),
++            mode: Mode::Hold,
++            control: control.clone(),
++            frame_num: 0,
++            next_frame: Instant::now(),
++        };
++        control.lock().unwrap().scenes = std::vec!["scene".to_string()];
++        lepton.shown = frame_of(held);
++        lepton
++    }
++
++    fn pixel(lepton: &Lepton) -> u16 {
++        lepton.shown.image_data.data()[0]
++    }
++
++    #[test]
++    fn holds_the_frame_until_asked() {
++        let mut lepton = lepton(29_000, &[30_000]);
++        for _ in 0..10 {
++            lepton.step();
++            assert_eq!(pixel(&lepton), 29_000);
++        }
++        assert_eq!(lepton.control.lock().unwrap().status, "hold");
++    }
++
++    #[test]
++    fn plays_a_scene_without_a_jump_into_or_out_of_it() {
++        // A scene that's 1000 raw units (10°C) from the held frame.
++        let mut lepton = lepton(29_000, &[30_000, 30_500, 30_000]);
++        lepton.control.lock().unwrap().request = Some(Request::Play("scene".into()));
++        let mut previous = pixel(&lepton);
++        let mut shown = Vec::new();
++        for _ in 0..400 {
++            // The scene's own frames move as the scene does; moving between them and the
++            // held frame is never more than a step.
++            let playing = matches!(lepton.mode, Mode::Playing { .. });
++            lepton.step();
++            let now = pixel(&lepton);
++            if playing {
++                shown.push(now);
++            } else {
++                assert!(now.abs_diff(previous) <= MAX_STEP, "{previous} -> {now}");
++            }
++            previous = now;
++        }
++        assert_eq!(shown, [30_000, 30_500, 30_000]);
++        assert_eq!(pixel(&lepton), 29_000, "back to the held frame");
++    }
++
++    #[test]
++    fn unknown_scenes_are_ignored() {
++        let mut lepton = lepton(29_000, &[30_000]);
++        lepton.control.lock().unwrap().request = Some(Request::Play("nothing".into()));
++        lepton.step();
++        assert!(matches!(lepton.mode, Mode::Hold));
++    }
++
++    #[test]
++    fn hold_ends_a_scene() {
++        let mut lepton = lepton(29_000, &[30_000; 50]);
++        lepton.control.lock().unwrap().request = Some(Request::Play("scene".into()));
++        for _ in 0..80 {
++            lepton.step();
++        }
++        assert!(matches!(lepton.mode, Mode::Playing { .. }));
++        lepton.control.lock().unwrap().request = Some(Request::Hold);
++        lepton.step();
++        assert!(matches!(lepton.mode, Mode::Hold));
++    }
 +}
 diff --git a/src/emulator/link.rs b/src/emulator/link.rs
 new file mode 100644
@@ -847,10 +1190,10 @@ index 0000000..8dd54b0
 +}
 diff --git a/src/emulator/mod.rs b/src/emulator/mod.rs
 new file mode 100644
-index 0000000..1796ebc
+index 0000000..678f3d8
 --- /dev/null
 +++ b/src/emulator/mod.rs
-@@ -0,0 +1,199 @@
+@@ -0,0 +1,219 @@
 +//! Runs the firmware in the TC2 emulator's container, next to QEMU, in place of the
 +//! RP2040. The firmware is the same code the tests run on the mocked HAL; only the
 +//! world outside the RP2040 differs (see `tests::mocks::world`):
@@ -861,6 +1204,7 @@ index 0000000..1796ebc
 +//!   with `--rp2040-link`, over QEMU's socket for a virtio-serial port.
 +//! - The Lepton's frames come from a CPTV file.
 +//! - Time is real time.
++//! - Scenes: CPTV files the Lepton plays on request through a control port.
 +//!
 +//! The RP2040's own peripherals (flash, DMA, PIO) are the mocks the tests use.
 +//!
@@ -868,6 +1212,7 @@ index 0000000..1796ebc
 +//! stopped at its next HAL call by unwinding with [`Restart`], and starts again from
 +//! `real_main`, much as a reset would.
 +
++mod control;
 +mod hw;
 +mod lepton;
 +mod link;
@@ -898,13 +1243,18 @@ index 0000000..1796ebc
 +    link_socket: PathBuf,
 +    /// The Lepton holds the first frame of this file; a flat frame if not given.
 +    cptv: Option<PathBuf>,
++    /// CPTV files here are scenes the Lepton can be asked to play, named by file name
++    /// without the extension.
++    scenes: Option<PathBuf>,
++    /// Address for the control port (see control.rs); none if not given.
++    control: Option<String>,
 +    /// The shortest time to wait for tc2-agent to answer a ping. The firmware waits
 +    /// as little as 300µs, which an emulated Pi can't manage.
 +    min_ping_wait: Duration,
 +}
 +
 +const USAGE: &str = "usage: tc2-firmware-emu [--hw-socket PATH] [--link PATH] [--cptv FILE] \
-+                     [--min-ping-wait-ms N]";
++                     [--scenes DIR] [--control ADDRESS] [--min-ping-wait-ms N]";
 +
 +impl Options {
 +    fn parse() -> Options {
@@ -912,6 +1262,8 @@ index 0000000..1796ebc
 +            hw_socket: PathBuf::from("/state/hw-rp2040.sock"),
 +            link_socket: PathBuf::from("/state/rp2040.sock"),
 +            cptv: None,
++            scenes: None,
++            control: None,
 +            min_ping_wait: Duration::from_millis(200),
 +        };
 +        let mut args = env::args().skip(1);
@@ -926,6 +1278,8 @@ index 0000000..1796ebc
 +                "--hw-socket" => options.hw_socket = value().into(),
 +                "--link" => options.link_socket = value().into(),
 +                "--cptv" => options.cptv = Some(value().into()),
++                "--scenes" => options.scenes = Some(value().into()),
++                "--control" => options.control = Some(value()),
 +                "--min-ping-wait-ms" => {
 +                    let ms: String = value();
 +                    options.min_ping_wait =
@@ -947,10 +1301,19 @@ index 0000000..1796ebc
 +pub fn run() -> ! {
 +    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 +    let options = Options::parse();
-+    let lepton = Lepton::new(options.cptv.as_deref()).unwrap_or_else(|e| {
-+        error!("{e}");
-+        process::exit(1)
-+    });
++    let control = lepton::SharedControl::default();
++    let lepton =
++        Lepton::new(options.cptv.as_deref(), options.scenes.as_deref(), control.clone())
++            .unwrap_or_else(|e| {
++                error!("{e}");
++                process::exit(1)
++            });
++    if let Some(address) = &options.control {
++        control::serve(address, control).unwrap_or_else(|e| {
++            error!("Control port on {address}: {e}");
++            process::exit(1)
++        });
++    }
 +    set_world(Box::new(EmulatorWorld {
 +        hw: Hw::new(options.hw_socket),
 +        link: Link::connect(options.link_socket),

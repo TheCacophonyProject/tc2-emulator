@@ -253,7 +253,12 @@ The Rust workspace in `crates/` stands in for the TC2 HAT:
   that tc2-agent ships, built on the firmware's mocked HAL with
   `guest/patches/tc2-firmware` (`scripts/build-tc2-firmware-emu.sh`). It runs in
   the container, is on the same I2C bus as the Pi (through `tc2-emu-hw`), and its
-  Lepton holds the first frame of `fixtures/cat-trigger.cptv`. It records to its
+  Lepton holds the first frame of `fixtures/cat-trigger.cptv`, so nothing
+  moves, until a test plays a scene: any CPTV file in `fixtures/`, by name, through the
+  firmware's control port (`localhost:9100`; line protocol: `scenes`, `play NAME`,
+  `hold`, `status`). Moving between the held frame and a scene cross-fades by at most
+  0.2°C a pixel a frame, so switching isn't motion; the scene's own frames are what
+  moves. The `scenes` e2e test plays the cat and expects a recording. It records to its
   emulated flash and offloads to tc2-agent as on a device, and in high power mode
   streams frames for thermal-recorder. Outside its recording window it has the Pi
   power off; the e2e tests set an always-on window to keep it up. QEMU runs with

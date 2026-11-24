@@ -8,6 +8,7 @@ services:
       - "2222:2222"  # ssh
       - "8080:8080"  # management-interface
       - "9000:9000"  # tc2-emu-hw control API
+      - "9100:9100"  # tc2-firmware-emu control port (scenes)
     environment:
       TC2_API: ${TC2_API:-host.docker.internal:1080}
       TC2_GROUP: ${TC2_GROUP:-}

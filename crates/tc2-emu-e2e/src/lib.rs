@@ -527,6 +527,44 @@ impl Hardware {
     }
 }
 
+/// The emulated RP2040's control port (tc2-firmware-emu's, see its src/emulator/control.rs),
+/// to change what its Lepton sees.
+pub struct Scenes;
+
+impl Scenes {
+    fn ask(request: &str) -> anyhow::Result<String> {
+        use std::io::{BufRead, Write};
+        let address = std::env::var("TC2_E2E_FIRMWARE").unwrap_or_else(|_| "localhost:9100".into());
+        let mut stream = std::net::TcpStream::connect(&address)
+            .with_context(|| format!("connecting to the firmware's control port at {address}"))?;
+        stream.set_read_timeout(Some(Duration::from_secs(10)))?;
+        writeln!(stream, "{request}")?;
+        let mut reply = String::new();
+        std::io::BufReader::new(stream).read_line(&mut reply)?;
+        let reply = reply.trim().to_string();
+        if reply.starts_with("error") {
+            bail!("`{request}`: {reply}");
+        }
+        Ok(reply)
+    }
+
+    /// The Lepton shows the scene (a CPTV file in the emulator's fixtures, by name) and
+    /// then goes back to the held frame.
+    pub fn play(name: &str) -> anyhow::Result<()> {
+        Self::ask(&format!("play {name}")).map(|_| ())
+    }
+
+    /// The Lepton goes back to the held frame at once.
+    pub fn hold() -> anyhow::Result<()> {
+        Self::ask("hold").map(|_| ())
+    }
+
+    /// `hold`, `entering NAME` or `playing NAME`.
+    pub fn status() -> anyhow::Result<String> {
+        Self::ask("status")
+    }
+}
+
 pub struct Guest;
 
 impl Guest {

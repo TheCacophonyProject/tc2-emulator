@@ -189,7 +189,7 @@ e2e: build stubs
 	TC2_START_TIME=$(E2E_START_TIME) TC2_CONFIG_SYNC_DELAY=100ms TC2_AUTOLOGIN=0 docker compose up -d --force-recreate
 	$(DOCKER_RUN) --add-host host.docker.internal:host-gateway -v $(CURDIR)/target/docker/passwd:/etc/passwd:ro \
 		-e TC2_E2E_API=$(E2E_HOST):1080 -e TC2_E2E_MANAGEMENTD=$(E2E_HOST):8080 \
-		-e TC2_E2E_HW=$(E2E_HOST):9000 -e TC2_E2E_SSH=host.docker.internal:2222 -e TC2_E2E_SSH_KEY=/src/images/id_ed25519 \
+		-e TC2_E2E_HW=$(E2E_HOST):9000 -e TC2_E2E_FIRMWARE=host.docker.internal:9100 -e TC2_E2E_SSH=host.docker.internal:2222 -e TC2_E2E_SSH_KEY=/src/images/id_ed25519 \
 		-e CARGO_HOME=/src/target/docker/cargo-home -e CARGO_TARGET_DIR=/src/target/docker \
 		tc2-emu-stubs-builder sh -ec 'for test in $(E2E_TESTS); do \
 			cargo test -p tc2-emu-e2e --test $$test -- --ignored --nocapture --test-threads=1; done'

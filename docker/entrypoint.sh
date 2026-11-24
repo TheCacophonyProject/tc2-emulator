@@ -70,7 +70,8 @@ if [[ ${TC2_AGENT:-real} == real ]]; then
     else
         [[ -x $EMU/host/tc2-firmware-emu ]] || { echo "missing $EMU/host/tc2-firmware-emu - run 'make stubs'" >&2; exit 1; }
         "$EMU/host/tc2-firmware-emu" --hw-socket "$STATE/hw-rp2040.sock" \
-            --link "$STATE/rp2040.sock" --cptv "$EMU/guest/fixtures/cat-trigger.cptv" &
+            --link "$STATE/rp2040.sock" --cptv "$EMU/guest/fixtures/cat-trigger.cptv" \
+            --scenes "$EMU/guest/fixtures" --control 0.0.0.0:9100 &
     fi
 fi
 
