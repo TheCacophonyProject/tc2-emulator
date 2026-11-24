@@ -1,0 +1,208 @@
+tc2-rp2040-logs: decode in a child process so a corrupt stream cannot kill the service
+
+defmt-decoder trusts the u32 element count of a `{=[?]}` argument and calls
+Vec::with_capacity() with it before reading any elements. A desynchronised RTT
+stream can therefore make it request gigabytes (seen in production as
+`memory allocation of 6758072480 bytes failed`), and Rust aborts the whole
+process on allocation failure, which cannot be caught.
+
+Run the decoder in a child process (this binary with --decode). The parent
+keeps openocd and the RTT socket, remembers the last 256 raw bytes, and on a
+child crash logs them and starts a fresh decoder. Five crashes in a minute
+restart the whole capture instead.
+
+diff --git a/src/bin/tc2-rp2040-logs.rs b/src/bin/tc2-rp2040-logs.rs
+index 2137b59..84ed65b 100644
+--- a/src/bin/tc2-rp2040-logs.rs
++++ b/src/bin/tc2-rp2040-logs.rs
+@@ -10,12 +10,21 @@
+ //!
+ //! Each line is prefixed with a syslog priority, so `journalctl -p warning`
+ //! and friends filter on the firmware's own log levels.
++//!
++//! The decoding itself runs in a child process (this same binary, started with
++//! `--decode`). defmt-decoder trusts length fields in the byte stream and
++//! reserves memory for them up front, so a desynchronised stream can make it
++//! ask for gigabytes (`memory allocation of 6758072480 bytes failed`). Rust
++//! aborts the whole process on that, and it cannot be caught - so the decoder
++//! lives somewhere it can die without taking openocd and the RTT connection
++//! with it. The parent notes the last bytes it sent, then starts a fresh child.
+ 
+ use defmt_decoder::{DecodeError, Frame, Table};
+ use object::{Object, ObjectSymbol};
+-use std::io::{BufRead, BufReader, ErrorKind, Read};
++use std::collections::VecDeque;
++use std::io::{self, BufRead, BufReader, ErrorKind, Read, Write};
+ use std::net::{SocketAddr, TcpStream};
+-use std::process::{Child, Command, Stdio};
++use std::process::{Child, ChildStdin, Command, Stdio};
+ use std::sync::Arc;
+ use std::sync::atomic::{AtomicBool, Ordering};
+ use std::thread::{self, sleep};
+@@ -45,8 +54,21 @@ impl Drop for OpenOcd {
+     }
+ }
+ 
++/// How many of the most recent raw bytes to keep, to log if the decoder dies.
++const RECENT_BYTES: usize = 256;
++/// A decoder that keeps dying means the stream (or the elf) is bad, not just
++/// unlucky. Past this many crashes inside `CRASH_WINDOW`, start over from
++/// openocd instead of respawning forever.
++const MAX_DECODER_CRASHES: usize = 5;
++const CRASH_WINDOW: Duration = Duration::from_secs(60);
++/// Exit code of the decoder child for "this stream cannot be decoded".
++const EXIT_UNDECODABLE: i32 = 2;
++
+ fn main() {
+     let elf_path = env::var("RP2040_FIRMWARE_ELF").unwrap_or_else(|_| DEFAULT_ELF.to_string());
++    if env::args().nth(1).as_deref() == Some("--decode") {
++        std::process::exit(decode_stdin(&elf_path));
++    }
+     let swd_config =
+         env::var("RP2040_SWD_CONFIG").unwrap_or_else(|_| DEFAULT_SWD_CONFIG.to_string());
+     let port =
+@@ -64,7 +86,8 @@ fn main() {
+ 
+ fn stream_logs(elf_path: &str, swd_config: &str, port: u16) -> Result<(), String> {
+     let elf = fs::read(elf_path).map_err(|e| format!("could not read {elf_path}: {e}"))?;
+-    let table = Table::parse(&elf)
++    // Fail early and clearly on a bad elf; the decoder child parses it again.
++    Table::parse(&elf)
+         .map_err(|e| format!("could not read defmt data from {elf_path}: {e}"))?
+         .ok_or_else(|| format!("{elf_path} has no defmt data"))?;
+     let rtt_address = rtt_control_block_address(&elf)?;
+@@ -92,7 +115,9 @@ fn stream_logs(elf_path: &str, swd_config: &str, port: u16) -> Result<(), String
+         .map_err(|e| format!("could not set a read timeout: {e}"))?;
+     eprintln!("<6>streaming rp2040 logs, rtt control block at {rtt_address:#010x}");
+ 
+-    let mut decoder = table.new_stream_decoder();
++    let mut decoder = Decoder::spawn()?;
++    let mut recent: VecDeque<u8> = VecDeque::with_capacity(RECENT_BYTES);
++    let mut crashes: VecDeque<Instant> = VecDeque::new();
+     let mut buf = [0u8; 1024];
+     loop {
+         if rtt_broken.load(Ordering::Relaxed) {
+@@ -108,6 +133,110 @@ fn stream_logs(elf_path: &str, swd_config: &str, port: u16) -> Result<(), String
+         if read == 0 {
+             return Err("openocd closed the rtt connection".to_string());
+         }
++        let bytes = &buf[..read];
++        recent.extend(bytes);
++        while recent.len() > RECENT_BYTES {
++            recent.pop_front();
++        }
++        if decoder.send(bytes).is_ok() {
++            continue;
++        }
++
++        // The decoder is gone. Say how, and what we had just fed it.
++        let status = decoder.reap();
++        if status.code() == Some(EXIT_UNDECODABLE) {
++            return Err(format!(
++                "malformed defmt frame; is {elf_path} the firmware that is flashed?"
++            ));
++        }
++        eprintln!(
++            "<3>rp2040 log decoder died ({status}); restarting it. Last {} bytes received: {}",
++            recent.len(),
++            hex(&recent)
++        );
++        let now = Instant::now();
++        crashes.push_back(now);
++        while crashes.front().is_some_and(|t| now.duration_since(*t) > CRASH_WINDOW) {
++            crashes.pop_front();
++        }
++        if crashes.len() >= MAX_DECODER_CRASHES {
++            return Err("log decoder keeps crashing; starting over".to_string());
++        }
++        // Fresh decoder state. Whatever it choked on is not worth replaying.
++        decoder = Decoder::spawn()?;
++        recent.clear();
++    }
++}
++
++fn hex(bytes: &VecDeque<u8>) -> String {
++    bytes.iter().map(|b| format!("{b:02x}")).collect()
++}
++
++/// The child process that does the decoding.
++struct Decoder {
++    child: Child,
++    stdin: ChildStdin,
++}
++
++impl Decoder {
++    fn spawn() -> Result<Self, String> {
++        let exe = env::current_exe().map_err(|e| format!("could not find ourselves: {e}"))?;
++        let mut child = Command::new(exe)
++            .arg("--decode")
++            .stdin(Stdio::piped())
++            // Decoded lines go straight to journald from the child.
++            .stdout(Stdio::inherit())
++            .stderr(Stdio::inherit())
++            .spawn()
++            .map_err(|e| format!("could not start the log decoder: {e}"))?;
++        let stdin = child.stdin.take().ok_or("decoder stdin was not captured")?;
++        Ok(Self { child, stdin })
++    }
++
++    fn send(&mut self, bytes: &[u8]) -> io::Result<()> {
++        self.stdin.write_all(bytes)?;
++        self.stdin.flush()
++    }
++
++    fn reap(&mut self) -> std::process::ExitStatus {
++        let _ = self.child.kill();
++        self.child.wait().expect("wait on decoder child")
++    }
++}
++
++impl Drop for Decoder {
++    fn drop(&mut self) {
++        let _ = self.child.kill();
++        let _ = self.child.wait();
++    }
++}
++
++/// Decoder child: raw RTT bytes in on stdin, log lines out on stdout. Returns
++/// the exit code. May abort outright on a corrupt stream - see the module docs.
++fn decode_stdin(elf_path: &str) -> i32 {
++    let table = match fs::read(elf_path)
++        .map_err(|e| format!("could not read {elf_path}: {e}"))
++        .and_then(|elf| {
++            Table::parse(&elf)
++                .map_err(|e| format!("could not read defmt data from {elf_path}: {e}"))?
++                .ok_or_else(|| format!("{elf_path} has no defmt data"))
++        }) {
++        Ok(table) => table,
++        Err(e) => {
++            eprintln!("<3>{e}");
++            return EXIT_UNDECODABLE;
++        }
++    };
++    let mut decoder = table.new_stream_decoder();
++    let mut stdin = io::stdin().lock();
++    let mut buf = [0u8; 1024];
++    loop {
++        let read = match stdin.read(&mut buf) {
++            Ok(0) => return 0, // parent went away
++            Ok(read) => read,
++            Err(e) if e.kind() == ErrorKind::Interrupted => continue,
++            Err(_) => return 0,
++        };
+         decoder.received(&buf[..read]);
+         loop {
+             match decoder.decode() {
+@@ -116,11 +245,7 @@ fn stream_logs(elf_path: &str, swd_config: &str, port: u16) -> Result<(), String
+                 // A reset mid-frame leaves a partial frame in the buffer, which
+                 // is normal here - the rp2040 restarts often.
+                 Err(DecodeError::Malformed) if table.encoding().can_recover() => continue,
+-                Err(DecodeError::Malformed) => {
+-                    return Err(format!(
+-                        "malformed defmt frame; is {elf_path} the firmware that is flashed?"
+-                    ));
+-                }
++                Err(DecodeError::Malformed) => return EXIT_UNDECODABLE,
+             }
+         }
+     }
