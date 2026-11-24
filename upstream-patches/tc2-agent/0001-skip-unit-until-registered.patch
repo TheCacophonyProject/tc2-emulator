@@ -1,0 +1,11 @@
+diff --git a/_releases/tc2-agent.service b/_releases/tc2-agent.service
+index 6935eaf..35df41f 100644
+--- a/_releases/tc2-agent.service
++++ b/_releases/tc2-agent.service
+@@ -1,5 +1,6 @@
+ [Unit]
+ Description=Cacophony Project TC2 Agent
++ConditionPathExists=/etc/salt/minion_id
+ DefaultDependencies=no
+ Wants=network-pre.target
+ Before=network-pre.target 

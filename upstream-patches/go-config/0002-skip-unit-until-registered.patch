@@ -1,0 +1,11 @@
+diff --git a/_release/cacophony-config-sync.service b/_release/cacophony-config-sync.service
+index 4879658..3165a1d 100644
+--- a/_release/cacophony-config-sync.service
++++ b/_release/cacophony-config-sync.service
+@@ -1,5 +1,6 @@
+ [Unit]
+ Description=Cacophony Config Sync Service
++ConditionPathExists=/etc/salt/minion_id
+ After=network.target
+ StartLimitInterval=200
+ StartLimitBurst=10
