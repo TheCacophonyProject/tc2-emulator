@@ -6,6 +6,17 @@ dir=$(dirname "$0")
 if grep -qw 'tc2-emu.agent=real' /proc/cmdline; then
     # The timezone lookup tc2-agent runs, which the real image has in /usr/bin.
     export TC2_TZLOOKUP="$dir/tc2-tzlookup"
+    # The emulated camera sits at one fixed location, whose timezone (about 10s of CPU
+    # per lookup here, which would land in the middle of the first test) the agent would
+    # otherwise look up when the device first learns it. Remember the answer as the agent
+    # does, keyed to 4 decimal places and the helper's version; see the agent's
+    # timezone_name (guest/patches/tc2-agent/0002). The lookup itself is exercised on real
+    # devices, and by any other location.
+    cache=/var/cache/tc2-agent/timezone
+    if [ ! -s "$cache" ] && version=$("$TC2_TZLOOKUP" --version 2>/dev/null) && [ -n "$version" ]; then
+        mkdir -p "$(dirname "$cache")"
+        printf '%s 172.6333 -43.5333\nPacific/Auckland\n' "$version" > "$cache"
+    fi
     exec "$dir/tc2-agent" --rp2040-link /dev/virtio-ports/org.cacophony.tc2-emu.rp2040 "$@"
 fi
 exec "$dir/tc2-emu-agent" "$@"

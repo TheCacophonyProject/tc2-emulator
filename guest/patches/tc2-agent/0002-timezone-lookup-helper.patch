@@ -14,7 +14,7 @@ diff --git a/src/device_config.rs b/src/device_config.rs
 index f49d4ec..96880ca 100644
 --- a/src/device_config.rs
 +++ b/src/device_config.rs
-@@ -17,15 +17,91 @@ use std::fmt::{Debug, Formatter};
+@@ -17,15 +17,95 @@ use std::fmt::{Debug, Formatter};
  use std::io::{Cursor, Write};
  use std::ops::Add;
  use std::path::Path;
@@ -60,7 +60,11 @@ index f49d4ec..96880ca 100644
 +        .ok()
 +        .filter(|output| output.status.success())
 +        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string());
-+    let key = format!("{} {lng:.6} {lat:.6}", version.as_deref().unwrap_or("unknown"));
++    // To 4 decimal places (about 10m): the same location reaches here as -43.5333 from the config
++    // and -43.533298 from the portal (an f32), which as different keys evict each other from this
++    // one-entry cache and cost a lookup each time. A timezone doesn't change within 10m, bar a
++    // camera on a border.
++    let key = format!("{} {lng:.4} {lat:.4}", version.as_deref().unwrap_or("unknown"));
 +    if let Some((cached_key, name)) = &cached {
 +        if version.is_some() && *cached_key == key {
 +            info!("Using the cached timezone '{name}' for the location");
