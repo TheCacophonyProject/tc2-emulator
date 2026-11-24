@@ -1,0 +1,100 @@
+diff --git a/src/piclassifier/__init__.py b/src/piclassifier/__init__.py
+index 92a54108..0b3d4eb0 100644
+--- a/src/piclassifier/__init__.py
++++ b/src/piclassifier/__init__.py
+@@ -1,6 +1,10 @@
+ def pi_classify():
+     from config.thermalconfig import ThermalConfig
++    from piclassifier.monitorconfig import config_mtime
+ 
++    # Before loading, so that a change made while this starts, which takes a while
++    # on a small device, is seen once the watch for changes starts.
++    loaded_mtime = config_mtime(ThermalConfig.find_config())
+     thermal_config = ThermalConfig.load_from_file()
+     parse_file = None
+     if (
+@@ -13,10 +17,12 @@ def pi_classify():
+         parse_file, restart_pending = main(thermal_config)
+         if not parse_file and restart_pending:
+             return
++        # It has watched the config since, and reloaded it when it went idle.
++        loaded_mtime = None
+ 
+     from piclassifier.piclassify import main
+ 
+-    main(thermal_config, parse_file=parse_file)
++    main(thermal_config, parse_file=parse_file, loaded_mtime=loaded_mtime)
+ 
+ 
+ def serve_model():
+diff --git a/src/piclassifier/monitorconfig.py b/src/piclassifier/monitorconfig.py
+index 61278432..94887f8d 100644
+--- a/src/piclassifier/monitorconfig.py
++++ b/src/piclassifier/monitorconfig.py
+@@ -1,4 +1,5 @@
+ import logging
++import os
+ from threading import Thread
+ from inotify_simple import INotify, flags
+ 
+@@ -22,3 +23,17 @@ def monitor_file(on_modify, filename="/etc/cacophony/config.toml"):
+     monitor_thread.daemon = True
+     monitor_thread.start()
+     return monitor_thread
++
++
++def config_mtime(filename):
++    """The config file's modification time, to take before loading it. Pass it to
++    changed_since() once monitor_file() has started watching, to find out whether the
++    file changed after it was loaded but before the watch could see it."""
++    try:
++        return os.stat(filename).st_mtime_ns
++    except OSError:
++        return None
++
++
++def changed_since(filename, mtime):
++    return mtime is not None and config_mtime(filename) != mtime
+diff --git a/src/piclassifier/piclassify.py b/src/piclassifier/piclassify.py
+index ecdad28e..3f63ffc1 100644
+--- a/src/piclassifier/piclassify.py
++++ b/src/piclassifier/piclassify.py
+@@ -16,7 +16,7 @@ from config.thermalconfig import ThermalConfig
+ from .headerinfo import HeaderInfo
+ from ml_tools.logs import init_logging
+ from .eventreporter import log_event
+-from piclassifier.monitorconfig import monitor_file
++from piclassifier.monitorconfig import changed_since, config_mtime, monitor_file
+ from pathlib import Path
+ from piclassifier import utils
+ from .signals import STOP_SIGNAL, SKIP_SIGNAL, SNAPSHOT_SIGNAL, PARSING_FILE, PARSED
+@@ -74,13 +74,16 @@ def parse_args():
+ 
+ 
+ # Links to socket and continuously waits for 1 connection
+-def main(thermal_config=None, parse_file=None):
++def main(thermal_config=None, parse_file=None, loaded_mtime=None):
+     init_logging()
+     args = parse_args()
+     if parse_file:
+         args.file = parse_file
+     config = Config.load_from_file(args.config_file)
+     if thermal_config is None or args.thermal_config_file is not None:
++        loaded_mtime = config_mtime(
++            args.thermal_config_file or ThermalConfig.find_config()
++        )
+         thermal_config = ThermalConfig.load_from_file(args.thermal_config_file)
+ 
+     other_services = []
+@@ -118,6 +121,11 @@ def main(thermal_config=None, parse_file=None):
+ 
+     # must be before any processes are started, see monitor_file
+     monitor_thread = monitor_file(file_changed, thermal_config.config_file)
++    if changed_since(thermal_config.config_file, loaded_mtime):
++        # Changed after it was loaded but before the watch started, which the watch
++        # can't see. Nothing has been started yet, so just exit to be restarted.
++        logging.info("Config changed while starting, restarting")
++        return
+ 
+     # TODO this will break things if we ever have different resolution or FPS
+     headers = default_headers()
