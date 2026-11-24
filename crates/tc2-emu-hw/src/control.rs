@@ -9,6 +9,10 @@
 //! - `PUT /rtc/time` with `{"time": "<RFC 3339>"}`
 //! - `PUT /time-warp` with `{"enabled": true}`: while the Pi and the RP2040 are both
 //!   powered off, the RTC jumps to its alarm instead of waiting for it
+//! - `PUT /rp2040/wake`: the RP2040's power is restored before its alarm, as if someone
+//!   removed and restored the power to the device. Without it, an RP2040 that has put
+//!   itself to sleep (the firmware does that for an audio only device, even with the Pi on)
+//!   can't be reached until the alarm.
 
 use crate::hat::{Hat, State};
 use crate::{aht20, attiny};
@@ -31,6 +35,7 @@ pub fn router(hat: SharedHat) -> Router {
         .route("/aht20", patch(patch_aht20))
         .route("/rtc/time", put(put_rtc_time))
         .route("/time-warp", put(put_time_warp))
+        .route("/rp2040/wake", put(put_rp2040_wake))
         .with_state(hat)
 }
 
@@ -47,6 +52,7 @@ device's management interface is on <a href="http://localhost:8080">port 8080</a
 <li><code>PATCH /aht20</code>: JSON with any of the AHT20 inputs, e.g. <code>{"temperature_celsius": 35}</code></li>
 <li><code>PUT /rtc/time</code>: <code>{"time": "2027-01-01T09:00:00Z"}</code></li>
 <li><code>PUT /time-warp</code>: <code>{"enabled": true}</code>, to skip the time the Pi and RP2040 are both off</li>
+<li><code>PUT /rp2040/wake</code>: restore the RP2040's power before its alarm</li>
 </ul>
 </body>
 "#;
@@ -96,6 +102,12 @@ async fn put_rtc_time(Shared(hat): Shared<SharedHat>, Json(body): Json<RtcTime>)
 #[derive(Deserialize)]
 struct TimeWarp {
     enabled: bool,
+}
+
+async fn put_rp2040_wake(Shared(hat): Shared<SharedHat>) -> Json<State> {
+    let mut hat = hat.lock().unwrap();
+    hat.rp2040_asleep = false;
+    Json(hat.state())
 }
 
 async fn put_time_warp(Shared(hat): Shared<SharedHat>, Json(body): Json<TimeWarp>) -> Json<State> {

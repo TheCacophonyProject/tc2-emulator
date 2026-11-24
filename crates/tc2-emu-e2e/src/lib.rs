@@ -463,6 +463,13 @@ impl TestDevice {
         let device_id = wait_for("device to reregister", Duration::from_secs(30), || {
             Ok(Some(managementd.device_info()?.device_id).filter(|id| *id != old_device_id))
         })?;
+        // An earlier test may have left the RP2040 asleep (it shuts itself down as an audio
+        // only device, even with the Pi on), out of the agent's reach until its alarm. With
+        // it unreachable the agent and the services that need it restart over and over,
+        // loading the guest. Its power restored, it takes the agent's config as it is now.
+        if Hardware::state().is_ok_and(|state| state["rp2040_asleep"] == true && state["pi_off"] == false) {
+            Hardware::wake_rp2040()?;
+        }
         Ok(TestDevice { managementd, user, project, project_id, device_id })
     }
 
@@ -507,6 +514,14 @@ impl Hardware {
                 .put(format!("{}/time-warp", hardware_url()))
                 .json(&json!({ "enabled": enabled })),
         )?;
+        Ok(())
+    }
+
+    /// Restores the RP2040's power if it has put itself to sleep until its alarm, as
+    /// the firmware does for an audio only device, even with the Pi on. The agent can't
+    /// reach it until then.
+    pub fn wake_rp2040() -> anyhow::Result<()> {
+        send_json::<Value>(Client::new().put(format!("{}/rp2040/wake", hardware_url())))?;
         Ok(())
     }
 

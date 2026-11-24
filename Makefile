@@ -191,8 +191,9 @@ e2e: build stubs
 		-e TC2_E2E_API=$(E2E_HOST):1080 -e TC2_E2E_MANAGEMENTD=$(E2E_HOST):8080 \
 		-e TC2_E2E_HW=$(E2E_HOST):9000 -e TC2_E2E_FIRMWARE=host.docker.internal:9100 -e TC2_E2E_SSH=host.docker.internal:2222 -e TC2_E2E_SSH_KEY=/src/images/id_ed25519 \
 		-e CARGO_HOME=/src/target/docker/cargo-home -e CARGO_TARGET_DIR=/src/target/docker \
-		tc2-emu-stubs-builder sh -ec 'for test in $(E2E_TESTS); do \
-			cargo test -p tc2-emu-e2e --test $$test -- --ignored --nocapture --test-threads=1; done'
+		tc2-emu-stubs-builder sh -c 'failed=; for test in $(E2E_TESTS); do \
+			cargo test -p tc2-emu-e2e --test $$test -- --ignored --nocapture --test-threads=1 || failed="$$failed $$test"; done; \
+			[ -z "$$failed" ] || { echo "FAILED:$$failed"; exit 1; }'
 
 ssh:
 	$(SSH)

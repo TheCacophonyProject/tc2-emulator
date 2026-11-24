@@ -1,0 +1,47 @@
+diff --git a/src/ml_tools/logs.py b/src/ml_tools/logs.py
+index 3da0cde3..223b4e5b 100644
+--- a/src/ml_tools/logs.py
++++ b/src/ml_tools/logs.py
+@@ -1,5 +1,41 @@
+-import sys
+ import logging
++import os
++import sys
++
++# The stdout/stderr objects replaced in forked children, kept alive on purpose: freeing one
++# flushes it, which takes the lock that the child can't get.
++_replaced_streams = []
++
++
++def _fresh_std_streams_after_fork():
++    """A process forked while another thread was writing to stderr (such as a log line) gets
++    that stream's buffer lock held with nobody left to release it, so its first write to the
++    stream blocks forever. Replace the streams, and logging handlers using them, in the child.
++    """
++    for name, fd in (("stdout", 1), ("stderr", 2)):
++        old = getattr(sys, name, None)
++        if old is None:
++            continue
++        try:
++            new = open(
++                fd,
++                "w",
++                buffering=1,
++                encoding=getattr(old, "encoding", None),
++                errors=getattr(old, "errors", None),
++                closefd=False,
++            )
++        except Exception:
++            continue
++        _replaced_streams.append(old)
++        setattr(sys, name, new)
++        for ref in list(logging._handlerList):
++            handler = ref()
++            if handler is not None and getattr(handler, "stream", None) is old:
++                handler.stream = new
++
++
++os.register_at_fork(after_in_child=_fresh_std_streams_after_fork)
+ 
+ 
+ def init_logging(name=None, timestamps=False):

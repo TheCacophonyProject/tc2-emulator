@@ -28,6 +28,10 @@ fn device_outside_its_window_powers_off_and_wakes_at_the_next_one() -> anyhow::R
     Hardware::set_time_warp(true)?;
 
     // A window that starts in six hours, by the device's own clock and time zone.
+    let since = Guest::now()?;
+    // An earlier test may have left the device audio only, which the firmware shuts down
+    // for even with the Pi on, and which wakes the Pi for audio recordings.
+    device.managementd.set_audio_recording("Disabled", 0)?;
     let hour: u32 = Guest::run("date +%H")?.trim().parse()?;
     let (start, stop) = ((hour + 6) % 24, (hour + 7) % 24);
     device.managementd.set_config(
@@ -35,6 +39,37 @@ fn device_outside_its_window_powers_off_and_wakes_at_the_next_one() -> anyhow::R
         json!({ "start-recording": format!("{start:02}:00"), "stop-recording": format!("{stop:02}:00") }),
     )?;
     lap("window set");
+    // The RP2040 may be asleep from an earlier test, out of the agent's reach until its
+    // alarm. Someone could restore its power; the agent then gives it the config.
+    if Hardware::state()?["rp2040_asleep"] == true {
+        Hardware::wake_rp2040()?;
+        lap("RP2040 woken");
+    }
+    // The RP2040 must have the window before the Pi powers off. Otherwise it goes by
+    // what an earlier test left it (audio alarms, say) and wakes the Pi for those.
+    wait_for("the RP2040 to get the new config", Duration::from_secs(120), || {
+        Ok(Some(()).filter(|_| {
+            Guest::journal_since("tc2-agent", since)
+                .map(|log| log.contains("Rp2040GotNewConfig"))
+                .unwrap_or(false)
+        }))
+    })?;
+    lap("RP2040 has the config");
+
+    // The firmware won't have the Pi power off while it holds recordings to offload, which
+    // earlier tests leave, and it only offloads them when the agent asks.
+    let asked = Guest::now()?;
+    Guest::run(
+        "sudo busctl --system call org.cacophony.TC2Agent /org/cacophony/TC2Agent \
+         org.cacophony.TC2Agent forcerp2040offload",
+    )?;
+    wait_for("the RP2040's recordings to be offloaded", Duration::from_secs(120), || {
+        let log = Guest::journal_since("tc2-agent", asked)?;
+        // Each restart reports what's left. Done when it reports events but no files.
+        let last = log.lines().rev().find(|l| l.contains("to offload"));
+        Ok(last.filter(|l| !l.contains("file(s)")).map(|_| ()))
+    })?;
+    lap("RP2040's recordings offloaded");
 
     Guest::run(&format!(
         "sudo mkdir -p $(dirname {DROP_IN}) && printf '%s\\n' '[Service]' 'ExecStart=' \
