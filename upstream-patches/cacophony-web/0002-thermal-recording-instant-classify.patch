@@ -1,0 +1,15 @@
+diff --git a/types/api/device.d.ts b/types/api/device.d.ts
+index f1c64d56..cb6c9d27 100644
+--- a/types/api/device.d.ts
++++ b/types/api/device.d.ts
+@@ -61,6 +61,10 @@ interface SettingsBase {
+ 
+ export type ThermalRecordingSettings = {
+   useLowPowerMode: boolean;
++  // Low power mode with instant classify is the "medium power" mode, where the
++  // device uploads its classifications soon after a detection. It needs the
++  // device to be able to reach a network, and only applies with useLowPowerMode.
++  instantClassify?: boolean;
+ } & SettingsBase;
+ 
+ export type AudioRecordingSettings = {

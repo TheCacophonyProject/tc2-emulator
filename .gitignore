@@ -4,3 +4,4 @@ target/
 build/
 upstream/
 fixtures/*.cptv
+real-device.conf

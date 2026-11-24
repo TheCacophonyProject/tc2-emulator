@@ -1,31 +1,50 @@
 #!/usr/bin/env bash
 # Runs inside the arm64 chroot of the TC2 rootfs, via prepare-image.sh, with
 # this repo's guest/ directory at /tmp/tc2-emu-guest.
+#
+# TC2_TARGET=emulator (the default) makes the image the emulator boots. TC2_TARGET=device
+# makes one to write to an SD card for a real TC2, to compare with the emulator: it has
+# the same software and the same changes, but none of what's for QEMU, and the builds
+# with guest/patches applied are installed over the packages' binaries instead of being
+# run from the emulator's share. Everything that's emulator-only is in `if emulator`.
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
+
+TARGET=${TC2_TARGET:-emulator}
+emulator() { [[ $TARGET == emulator ]]; }
+if ! emulator; then
+    # The wifi network and test API for the device, from real-device.conf.
+    # shellcheck disable=SC1091
+    [[ ! -f /tmp/tc2-real.conf ]] || . /tmp/tc2-real.conf
+    # Fail now, not after the build, rather than register a device with production.
+    if [[ -n ${API_URL:-} ]]; then
+        if [[ $API_URL != http://* && $API_URL != https://* ]]; then
+            echo "ERROR: API_URL in real-device.conf isn't an http(s) URL: $API_URL" >&2
+            exit 1
+        fi
+        if [[ $API_URL == *cacophony.org.nz* ]]; then
+            echo "ERROR: API_URL in real-device.conf is a production API: $API_URL" >&2
+            exit 1
+        fi
+    fi
+fi
 
 # The QEMU host side of the guest's eth0 network. The test API is forwarded to
 # port 1080 here (see docker/entrypoint.sh).
 HOST_IP=192.168.1.1
-API_URL=http://$HOST_IP:1080
+EMU_API_URL=http://$HOST_IP:1080
 
 # Emulator binaries (tc2-emu-*) are shared from the container over 9p.
 EMU_DIR=/opt/tc2-emu
 
-# Pi-hardware-only or unwanted in the emulator. Not masked, since some of these
-# are unit files in /etc/systemd/system; tc2-emu.enable=<name> turns one back on.
+# Not run in the emulator or on the device. Not masked, since some of these are unit
+# files in /etc/systemd/system; tc2-emu.enable=<name> on the kernel command line (in
+# cmdline.txt, on a device) turns one back on.
 DISABLED_SERVICES=(
-    dphys-swapfile
-    rpi-eeprom-update
-    sshswitch
+    # No salt master to take orders from. On a device this would update it behind our
+    # back as well as contacting the production salt master.
     salt-minion
     salt-updater
-    # No USB modem. It only starts once registering makes /etc/salt/minion_id,
-    # then exits at once and restarts every 5s, loading the guest.
-    modemd
-    # No wlan0. It tries to start the hotspot anyway, taking NetworkManager down
-    # (and with it the host's connections to managementd), then exits and restarts.
-    rpi-net-manager
     # Loads the console keymap for a keyboard on the HDMI console, which a TC2
     # never has (and the layout is "us", the kernel's default anyway): the cached
     # /etc/console-setup/cached_setup_keyboard.sh (kbd_mode on tty1-6, loadkeys),
@@ -52,7 +71,22 @@ DISABLED_SERVICES=(
     # entry just matches it.
     rpi-display-backlight
 )
+# What a real TC2 has that the emulator doesn't.
+EMULATOR_DISABLED_SERVICES=(
+    rpi-eeprom-update
+    sshswitch
+    # No USB modem. It only starts once registering makes /etc/salt/minion_id,
+    # then exits at once and restarts every 5s, loading the guest.
+    modemd
+    # No wlan0. It tries to start the hotspot anyway, taking NetworkManager down
+    # (and with it the host's connections to managementd), then exits and restarts.
+    rpi-net-manager
+)
+if emulator; then
+    DISABLED_SERVICES+=("${EMULATOR_DISABLED_SERVICES[@]}")
+fi
 
+if emulator; then
 # Generic arm64 kernel for QEMU -M virt. The initramfs is built in the chroot, so
 # it must not try to detect modules from the build host.
 mkdir -p /etc/initramfs-tools/conf.d
@@ -76,6 +110,7 @@ dpkg-query -W -f '${Package}\n' | sort > /tmp/packages-after
 comm -13 /tmp/packages-before /tmp/packages-after | xargs apt-get purge -y
 rm -rf /tmp/gpio-mockup-build /tmp/packages-before /tmp/packages-after
 apt-get clean
+fi
 
 # Update the Cacophony software to the versions salt deploys, pinned in
 # guest/versions/packages.txt, as saltops' cacophony.pkg_installed_from_github and
@@ -86,6 +121,10 @@ while read -r pkg version; do
     '' | '#'*) continue ;;
     classifier-pipeline)
         /home/pi/.venv/classifier/bin/python3 -m pip install --no-cache-dir "$pkg==$version"
+        # guest/patches/classifier-pipeline, from the repo's src/ to the installed package.
+        for patch in /tmp/tc2-emu-guest/patches/classifier-pipeline/*.patch; do
+            patch -p2 -d /home/pi/.venv/classifier/lib/python3.11/site-packages < "$patch"
+        done
         continue
         ;;
     esac
@@ -115,12 +154,23 @@ done < /tmp/tc2-emu-guest/versions/packages.txt
 # from above, so this is files, models and service enablement.
 /tmp/tc2-emu-guest/salt/apply-salt.sh
 
+# classifier-pipeline downloads label_paths.json from the main branch of
+# cacophony-web the first time it loads a model, into its working directory, which
+# for the thermal-recorder-py service is /. A device does that itself when it has
+# internet, but the emulated one has none, so without the file the models never
+# load and nothing is classified. This is a device that has already downloaded it.
+if emulator; then
+    curl -sfL -o /label_paths.json \
+        https://raw.githubusercontent.com/TheCacophonyProject/cacophony-web/main/api/classifications/label_paths.json
+fi
+
 # No salt master. The image's minion config retries it forever (master_tries:
 # -1), so salt-call without --local never exits: managementd runs `salt-call
 # grains.setvals` (go-utils saltutil.SetGrains) on each reregister, and these
 # piled up until the guest ran out of memory. Run salt-call masterless instead.
 mkdir -p /etc/salt/minion.d
 echo 'file_client: local' > /etc/salt/minion.d/tc2-emu.conf
+if emulator; then
 # Even masterless, each salt-call takes ~38MB and minutes to start on the guest,
 # and with the e2e tests reregistering every few seconds they still piled up
 # until it ran out of memory. Use the stub on the share (guest/bin/salt-call),
@@ -185,6 +235,55 @@ replace_service tc2-agent tc2-agent-launcher
 replace_service tc2-hat-attiny "tc2-hat-controller attiny"
 replace_service cacophony-config-sync cacophony-config-sync-launcher
 replace_service managementd managementd
+# Not before the device registers, as managementd isn't: otherwise they start, fail
+# for want of a registration and wait to restart. device-register starts them once
+# /etc/salt/minion_id exists. This is what upstream-patches/tc2-agent/0001 and
+# upstream-patches/go-config/0002 do to the units themselves.
+for unit in tc2-agent cacophony-config-sync; do
+    printf '\n[Unit]\nConditionPathExists=/etc/salt/minion_id\n' >> "/etc/systemd/system/$unit.service.d/tc2-emu.conf"
+done
+# thermal-recorder-py exits whenever /etc/cacophony/config.toml changes, even in sections
+# it doesn't read, and systemd restarts it after RestartSec=3s. Every e2e test that sets
+# config pays that wait before a recording can be taken, so don't wait here. (Upstream
+# the exit is the simple way to reload its config, which several processes copy at
+# start; the restart is wasteful, as is its slow Python start, but not ours to change here.)
+# What upstream-patches/tc2-hat-controller/0002 does to the units: tc2-hat-i2c counts as
+# started once it owns org.cacophony.i2c, and tc2-hat-rtc and tc2-hat-attiny order after it,
+# as both need it at start, and so does tc2-agent (it reads and writes the ATtiny over
+# it, not through tc2-hat-attiny; upstream-patches/tc2-agent/0002). Without that, they raced it at boot: tc2-hat-rtc failed its
+# first check and retried every 3s, and tc2-hat-attiny read "no I2C service" as "no ATtiny".
+tc2_ordering_dropin() {
+    mkdir -p "/etc/systemd/system/$1.service.d"
+    cat > "/etc/systemd/system/$1.service.d/tc2-ordering.conf"
+}
+tc2_ordering_dropin tc2-hat-i2c <<'EOF'
+[Service]
+Type=dbus
+BusName=org.cacophony.i2c
+EOF
+for unit in tc2-hat-rtc tc2-hat-attiny tc2-agent; do
+    tc2_ordering_dropin "$unit" <<'EOF'
+[Unit]
+After=tc2-hat-i2c.service
+Wants=tc2-hat-i2c.service
+EOF
+done
+# The tc2-agent package's postinst asks it to offload and erase the RP2040 flash on its
+# first run, after which it exits and waits RestartSec=5s to restart. The emulated flash
+# starts empty and is never erased, so on every fresh boot that is a pointless exit.
+if emulator; then
+    rm -f /etc/cacophony/offload_erase
+fi
+mkdir -p /etc/systemd/system/thermal-recorder-py.service.d
+printf '[Service]\nRestartSec=0\n' > /etc/systemd/system/thermal-recorder-py.service.d/tc2-emu.conf
+else
+# The builds with guest/patches applied (see the Makefile's real-image target) go over
+# the packages' binaries. The units run them as they do the packages'; the emulator's
+# patches add flags (--rp2040-link, --sync-delay) that are off unless given.
+for bin in managementd tc2-agent tc2-hat-controller device-register cacophony-config-utils tc2-tzlookup event-reporter-tools; do
+    install -m 755 "/tmp/tc2-real-bins/$bin" "/usr/bin/$bin"
+done
+fi
 
 # managementd runs socket activated (guest/patches/management-interface 0003):
 # systemd listens on port 80 and starts it for the first connection, and it exits
@@ -205,13 +304,11 @@ EOF
 systemctl disable managementd.service
 systemctl enable managementd.socket
 
-for svc in "${DISABLED_SERVICES[@]}"; do
-    mkdir -p "/etc/systemd/system/$svc.service.d"
-    printf '[Unit]\nConditionKernelCommandLine=tc2-emu.enable=%s\n' "$svc" \
-        > "/etc/systemd/system/$svc.service.d/tc2-emu.conf"
-done
-rm -f /var/swap
+if emulator; then
+    rm -f /var/swap
+fi
 
+if emulator; then
 # The first-boot rc.local expands the rootfs on /dev/mmcblk0 then reboots. The
 # emulated disk is already full size, so skip straight to the normal rc.local.
 if [[ -f /etc/rc.local.bak ]]; then
@@ -266,7 +363,46 @@ RestartSec=1
 WantedBy=multi-user.target
 EOF
 systemctl enable tc2-emu-dns.service
+
+# Swap is on, as on a real TC2 (dphys-swapfile, with the swap file size and swappiness salt
+# sets), so memory use that would swap there does here. While we audit that nothing swaps
+# on an SD card, report it as an event. Emulator only; see guest/bin/tc2-emu-swap-watcher.
+cat > /etc/systemd/system/tc2-emu-swap-watcher.service <<EOF
+[Unit]
+Description=Emulator: report swap use as an event
+After=event-reporter.service
+RequiresMountsFor=$EMU_DIR
+
+[Service]
+ExecStart=$EMU_DIR/guest/tc2-emu-swap-watcher
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+systemctl enable tc2-emu-swap-watcher.service
+# tc2-hat-rtc sets the clock from the RTC's whole seconds, so the guest is up to a
+# second behind the host; set it exactly. See guest/bin/tc2-emu-timesync.
+cat > /etc/systemd/system/tc2-emu-timesync.service <<EOF
+[Unit]
+Description=Emulator: set the clock from the host to the millisecond
+After=tc2-hat-rtc.service tc2-emu-eth0.service
+RequiresMountsFor=$EMU_DIR
+
+[Service]
+# Not oneshot, which would hold up multi-user.target (and device-register after it)
+# while this waits for tc2-hat-rtc.
+Type=simple
+ExecStart=$EMU_DIR/guest/tc2-emu-timesync
+
+[Install]
+WantedBy=multi-user.target
+EOF
+systemctl enable tc2-emu-timesync.service
 echo 'port=0' > /etc/dnsmasq.d/tc2-emu.conf
+fi
+
 # The guest's eth0 is the link to the host (QEMU user networking). The image
 # configures it statically through ifupdown (/etc/network/interfaces.d/eth0,
 # from saltops tc2/network-manager, only for debugging with a laptop plugged in,
@@ -312,6 +448,7 @@ AccuracySec=1min
 OnBootSec=5min
 OnUnitActiveSec=1d
 EOF
+if emulator; then
 cat > /etc/systemd/system/tc2-emu-eth0.service <<EOF
 [Unit]
 Description=Emulator: address the host link on eth0
@@ -335,7 +472,9 @@ systemctl enable tc2-emu-eth0.service
 printf '[main]\ndns=none\n\n[keyfile]\nunmanaged-devices=interface-name:eth0\n' > /etc/NetworkManager/conf.d/tc2-emu.conf
 rm -f /etc/resolv.conf
 echo 'nameserver 127.0.0.1' > /etc/resolv.conf
+fi
 
+if emulator; then
 # Register with the test API rather than production. The group and name can be
 # set with tc2-emu.group= and tc2-emu.name= on the kernel command line. Runs the
 # patched device-register from the share, which starts the services that need a
@@ -350,7 +489,7 @@ for arg in \$(cat /proc/cmdline); do
         tc2-emu.name=*) name=\${arg#*=} ;;
     esac
 done
-exec $EMU_DIR/guest/device-register --start-services --retry-until-registered --api $API_URL \\
+exec $EMU_DIR/guest/device-register --start-services --retry-until-registered --api $EMU_API_URL \\
     --group "\$group" \${name:+--name "\$name"}
 EOF
 chmod +x /usr/local/bin/tc2-emu-device-register
@@ -363,7 +502,26 @@ RequiresMountsFor=$EMU_DIR
 ExecStart=
 ExecStart=/usr/local/bin/tc2-emu-device-register
 EOF
+else
+# Register with the test API from real-device.conf, never production, with the
+# patched device-register, which starts the services that need a registered device
+# rather than rebooting, as the patched release's unit does. Without a test API the
+# device stays unregistered and device-register is disabled, so that nothing contacts
+# the production API; everything that needs a registered device then doesn't run.
+if [[ -n ${API_URL:-} ]]; then
+    mkdir -p /etc/systemd/system/device-register.service.d
+    # Sorts after the overwrite.conf salt installs there.
+    cat > /etc/systemd/system/device-register.service.d/tc2-real.conf <<EOF
+[Service]
+ExecStart=
+ExecStart=/usr/bin/device-register --start-services --retry-until-registered --prefix=tc2 --api $API_URL --group ${GROUP:-new}
+EOF
+else
+    DISABLED_SERVICES+=(device-register)
+fi
+fi
 
+if emulator; then
 # Stream this boot's journal to the container (/state/journal.log there) over a
 # virtio-serial port, so it's readable without SSH and survives guest hangs and
 # reboots. Starts as soon as the port appears and replays the boot so far. If it
@@ -418,6 +576,58 @@ cat > /etc/systemd/system/serial-getty@ttyAMA0.service.d/autologin.conf <<'EOF'
 ExecStart=
 ExecStart=-/usr/local/sbin/tc2-emu-serial-getty %I $TERM
 EOF
+fi
+
+# After everything above has had its say on DISABLED_SERVICES.
+for svc in "${DISABLED_SERVICES[@]}"; do
+    mkdir -p "/etc/systemd/system/$svc.service.d"
+    printf '[Unit]\nConditionKernelCommandLine=tc2-emu.enable=%s\n' "$svc" \
+        > "/etc/systemd/system/$svc.service.d/tc2-emu.conf"
+done
+
+if ! emulator; then
+    # The wifi network to join, from real-device.conf, which takes priority over the
+    # bushnet network the image already knows. There's no ethernet on a TC2, so this is
+    # the only way to reach it. NetworkManager keyfiles must be root-only.
+    if [[ -n ${WIFI_SSID:-} ]]; then
+        {
+            echo '[connection]'
+            echo "id=$WIFI_SSID"
+            echo "uuid=$(cat /proc/sys/kernel/random/uuid)"
+            echo 'type=wifi'
+            echo 'autoconnect-priority=100'
+            echo 'interface-name=wlan0'
+            echo
+            echo '[wifi]'
+            echo 'mode=infrastructure'
+            echo "ssid=$WIFI_SSID"
+            [[ ${WIFI_HIDDEN:-} != yes ]] || echo 'hidden=true'
+            if [[ -n ${WIFI_PSK:-} ]]; then
+                echo
+                echo '[wifi-security]'
+                echo 'auth-alg=open'
+                echo 'key-mgmt=wpa-psk'
+                echo "psk=$WIFI_PSK"
+            fi
+            echo
+            echo '[ipv4]'
+            echo 'method=auto'
+            echo 'route-metric=10'
+            echo
+            echo '[ipv6]'
+            echo 'addr-gen-mode=default'
+            echo 'method=auto'
+            echo 'route-metric=10'
+        } > /etc/NetworkManager/system-connections/tc2-real-wifi.nmconnection
+        chmod 600 /etc/NetworkManager/system-connections/tc2-real-wifi.nmconnection
+    else
+        echo "WARNING: no WIFI_SSID in real-device.conf: the device will only have the hotspot" >&2
+    fi
+    # The wifi regulatory domain, if the image doesn't have one set and the network needs it.
+    if [[ -n ${WIFI_COUNTRY:-} ]] && ! grep -q 'cfg80211.ieee80211_regdom' /boot/firmware/cmdline.txt; then
+        sed -i "1 s/\$/ cfg80211.ieee80211_regdom=$WIFI_COUNTRY/" /boot/firmware/cmdline.txt
+    fi
+fi
 
 # SSH key for tests.
 install -d -m 700 -o pi -g pi /home/pi/.ssh
@@ -425,4 +635,8 @@ cat /tmp/tc2-emu.pub >> /home/pi/.ssh/authorized_keys
 chown pi:pi /home/pi/.ssh/authorized_keys
 chmod 600 /home/pi/.ssh/authorized_keys
 
-echo "built=$(date -Iseconds)" > /etc/tc2-emulator
+if emulator; then
+    echo "built=$(date -Iseconds)" > /etc/tc2-emulator
+else
+    echo "built=$(date -Iseconds) saltops=$(awk '$1 == "commit" { print $2 }' /tmp/tc2-emu-guest/versions/saltops.txt)" > /etc/tc2-real-image
+fi

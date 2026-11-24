@@ -1,0 +1,11 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index 0a703eb..b95bc4f 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -57,3 +57,6 @@ revision = ""
+ 
+ [profile.release]
+ lto = true
++# Smaller binary, which is downloaded over the cellular modem on each update.
++strip = true
++codegen-units = 1

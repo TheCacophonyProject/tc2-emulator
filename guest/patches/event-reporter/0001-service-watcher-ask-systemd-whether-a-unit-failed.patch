@@ -1,0 +1,118 @@
+diff --git a/internal/service-watcher/main.go b/internal/service-watcher/main.go
+index 7b3463c..2a8bf56 100644
+--- a/internal/service-watcher/main.go
++++ b/internal/service-watcher/main.go
+@@ -162,14 +162,24 @@ func Run(inputArgs []string, ver string) error {
+ 				break
+ 			}
+ 
+-			rawLogs, failed, err := getLogs(unitName, numLogLines)
++			// Ask systemd whether this is a failure, rather than reading the unit's logs to find
++			// out. Every unit that starts passes through "activating", and searching the journal
++			// for each one (journalctl -u over a large journal) is slow and memory hungry on a
++			// small device.
++			failed, err := unitFailed(context.Background(), conn, update.UnitName, activeState)
+ 			if err != nil {
+-				return err
++				log.Debugf("Couldn't check if %s failed: %v", unitName, err)
++				break
+ 			}
+ 			if !failed {
+ 				break // Can just be a service activating
+ 			}
+ 
++			rawLogs, _, err := getLogs(unitName, numLogLines)
++			if err != nil {
++				return err
++			}
++
+ 			log.Printf("Service failed. unitName: %s, activeState: %s", unitName, activeState)
+ 			for _, l := range rawLogs {
+ 				log.Debug(l)
+@@ -216,6 +226,56 @@ func Run(inputArgs []string, ver string) error {
+ 	}
+ }
+ 
++// unitFailed returns whether systemd considers the unit to have failed. That is when it is in the
++// failed state or, for a unit that is activating, when the result of its last run wasn't success
++// (which is how a failed unit looks while it waits to be restarted). Failures of any unit are
++// reported, not just Cacophony's.
++func unitFailed(ctx context.Context, conn *systemdbus.Conn, fullUnitName, activeState string) (bool, error) {
++	if activeState == "failed" {
++		return true, nil
++	}
++	unitType := unitTypeName(fullUnitName)
++	if unitType == "" {
++		return false, nil // Not a kind of unit that has a result.
++	}
++	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
++	defer cancel()
++	prop, err := conn.GetUnitTypePropertyContext(ctx, fullUnitName, unitType, "Result")
++	if err != nil {
++		return false, err
++	}
++	result := strings.Trim(prop.Value.String(), "\"")
++	return result != "" && result != "success", nil
++}
++
++// unitTypeName is the name of the D-Bus interface suffix with the Result property for a unit, from
++// the unit's file name, or "" for units that don't have one (targets, slices, devices, ...).
++func unitTypeName(fullUnitName string) string {
++	dot := strings.LastIndex(fullUnitName, ".")
++	if dot < 0 {
++		return ""
++	}
++	switch fullUnitName[dot+1:] {
++	case "service":
++		return "Service"
++	case "scope":
++		return "Scope"
++	case "socket":
++		return "Socket"
++	case "mount":
++		return "Mount"
++	case "swap":
++		return "Swap"
++	case "timer":
++		return "Timer"
++	case "path":
++		return "Path"
++	case "automount":
++		return "Automount"
++	}
++	return ""
++}
++
+ func getLogs(unitName string, numLines int) ([]string, bool, error) {
+ 	failed := false
+ 	cmd := exec.Command(
+diff --git a/internal/service-watcher/unit_type_test.go b/internal/service-watcher/unit_type_test.go
+new file mode 100644
+index 0000000..a9d8d09
+--- /dev/null
++++ b/internal/service-watcher/unit_type_test.go
+@@ -0,0 +1,24 @@
++package servicewatcher
++
++import "testing"
++
++func TestUnitTypeName(t *testing.T) {
++	for name, want := range map[string]string{
++		"tc2-agent.service":    "Service",
++		"user@1000.service":    "Service",
++		"session-3.scope":      "Scope",
++		"dbus.socket":          "Socket",
++		"boot-firmware.mount":  "Mount",
++		"var-swap.swap":        "Swap",
++		"logrotate.timer":      "Timer",
++		"multi-user.target":    "",
++		"user.slice":           "",
++		"dev-mmcblk0p2.device": "",
++		"no-suffix":            "",
++		"trailing.dot.":        "",
++	} {
++		if got := unitTypeName(name); got != want {
++			t.Errorf("unitTypeName(%q) = %q, want %q", name, got, want)
++		}
++	}
++}

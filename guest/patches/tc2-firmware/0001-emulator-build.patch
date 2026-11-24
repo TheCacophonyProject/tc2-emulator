@@ -1,0 +1,1592 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index 04c1772..68dc46c 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -502,6 +502,7 @@ dependencies = [
+  "anstream",
+  "anstyle",
+  "env_filter",
++ "jiff",
+  "log",
+ ]
+ 
+@@ -788,6 +789,41 @@ dependencies = [
+  "either",
+ ]
+ 
++[[package]]
++name = "jiff"
++version = "0.2.46"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "175dc66334db3b9ab9985bf8b61cfed50dc16d20964bb47f9e479adcae984a7f"
++dependencies = [
++ "jiff-core",
++ "jiff-static",
++ "log",
++ "portable-atomic",
++ "portable-atomic-util",
++ "serde_core",
++]
++
++[[package]]
++name = "jiff-core"
++version = "0.1.8"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "e599b80292e597019b8b3e392de3f4bea2959ddfb8c7dff60e035e9e311a2c1b"
++dependencies = [
++ "log",
++]
++
++[[package]]
++name = "jiff-static"
++version = "0.2.46"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "c7b1af7547d47354bc438d797e3854601bde8f8d185780c5ba4ab27afa54f1ba"
++dependencies = [
++ "jiff-core",
++ "proc-macro2",
++ "quote",
++ "syn 2.0.103",
++]
++
+ [[package]]
+ name = "js-sys"
+ version = "0.3.81"
+@@ -1144,6 +1180,15 @@ version = "1.11.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "f84267b20a16ea918e43c6a88433c2d54fa145c92a811b5b047ccbe153674483"
+ 
++[[package]]
++name = "portable-atomic-util"
++version = "0.2.8"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "10ab3eb7f3becc3a1cbc4f2c6f20267996cfc1a6467a873763411b136a122715"
++dependencies = [
++ "portable-atomic",
++]
++
+ [[package]]
+ name = "precomputed-hash"
+ version = "0.1.1"
+@@ -1549,6 +1594,7 @@ dependencies = [
+  "defmt-rtt",
+  "embedded-hal 1.0.0",
+  "embedded-io 0.7.1",
++ "env_logger",
+  "flate2",
+  "fugit",
+  "log",
+diff --git a/Cargo.toml b/Cargo.toml
+index 942a056..7c9752f 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -12,6 +12,15 @@ doctest = false
+ bench = false
+ required-features = ["no-std"]
+ 
++# The firmware on the mocked HAL, against the TC2 emulator's hardware and a real
++# tc2-agent (see src/emulator/mod.rs).
++[[bin]]
++name = "tc2-firmware-emu"
++path = "src/main_emu.rs"
++doctest = false
++bench = false
++required-features = ["emulator"]
++
+ [[test]]
+ name = "tc2-firmware-tests"
+ path = "src/main_test.rs"
+@@ -32,7 +41,7 @@ defmt-rtt = { version = "1.0.0", optional = true }
+ panic-probe = { version = "1.0.0", optional = true }
+ byteorder = { version = "1.5.0", default-features = false }
+ bytemuck = "1.23.1"
+-#env_logger = { version = "0.11.8", optional = true }
++env_logger = { version = "0.11.8", optional = true, default-features = false, features = ["humantime"] }
+ test-log = { version = "0.2.18", optional = true }
+ 
+ critical-section = { version = "1.2.0", optional = true }
+@@ -104,6 +113,8 @@ no-std = [
+     "dep:rp2040-hal",
+ ]
+ 
++emulator = ["std", "dep:env_logger"]
++
+ std = [
+     "dep:serde",
+     "dep:louvre",
+diff --git a/src/emulator/hw.rs b/src/emulator/hw.rs
+new file mode 100644
+index 0000000..b44941b
+--- /dev/null
++++ b/src/emulator/hw.rs
+@@ -0,0 +1,86 @@
++//! I2C transactions on the emulator's device models (tc2-emu-hw), over a unix
++//! socket. Each transaction is a request, answered before the next one is sent:
++//!
++//! - request: `[address: u8][read length: u16 LE][write length: u16 LE][write bytes]`
++//! - response: `[status: u8][length: u16 LE][bytes]`, where status 0 means the bytes
++//!   are the data read, and anything else that the transaction failed, with the
++//!   bytes saying why (UTF-8).
++
++extern crate std;
++use crate::tests::mocks::bsp::hal::i2c::I2cError;
++use byteorder::{ByteOrder, LittleEndian};
++use log::{info, warn};
++use std::io::{Read, Write};
++use std::os::unix::net::UnixStream;
++use std::path::PathBuf;
++use std::string::String;
++use std::vec::Vec;
++
++pub struct Hw {
++    socket: PathBuf,
++    stream: Option<UnixStream>,
++}
++
++impl Hw {
++    pub fn new(socket: PathBuf) -> Hw {
++        Hw {
++            socket,
++            stream: None,
++        }
++    }
++
++    /// Writes `write` to `address`, then reads `read_len` bytes. Fails like a NAKed
++    /// transaction if there's no device there, or tc2-emu-hw isn't reachable, which
++    /// the firmware retries.
++    pub fn tx(&mut self, address: u8, write: &[u8], read_len: usize) -> Result<Vec<u8>, I2cError> {
++        match self.try_tx(address, write, read_len) {
++            Ok(Ok(data)) if data.len() == read_len => Ok(data),
++            Ok(Ok(data)) => {
++                warn!(
++                    "I2C {address:#04x}: wanted {read_len} bytes, got {}",
++                    data.len()
++                );
++                Err(I2cError)
++            }
++            Ok(Err(reason)) => {
++                warn!("I2C {address:#04x} {write:02x?}: {reason}");
++                Err(I2cError)
++            }
++            Err(e) => {
++                if self.stream.take().is_some() {
++                    warn!("Lost tc2-emu-hw at {}: {e}", self.socket.display());
++                }
++                Err(I2cError)
++            }
++        }
++    }
++
++    #[allow(clippy::cast_possible_truncation)]
++    fn try_tx(
++        &mut self,
++        address: u8,
++        write: &[u8],
++        read_len: usize,
++    ) -> std::io::Result<Result<Vec<u8>, String>> {
++        if self.stream.is_none() {
++            self.stream = Some(UnixStream::connect(&self.socket)?);
++            info!("Connected to tc2-emu-hw at {}", self.socket.display());
++        }
++        let stream = self.stream.as_mut().unwrap();
++        let mut request = std::vec![address, 0, 0, 0, 0];
++        LittleEndian::write_u16(&mut request[1..3], read_len as u16);
++        LittleEndian::write_u16(&mut request[3..5], write.len() as u16);
++        request.extend_from_slice(write);
++        stream.write_all(&request)?;
++
++        let mut header = [0u8; 3];
++        stream.read_exact(&mut header)?;
++        let mut data = std::vec![0u8; LittleEndian::read_u16(&header[1..3]) as usize];
++        stream.read_exact(&mut data)?;
++        Ok(if header[0] == 0 {
++            Ok(data)
++        } else {
++            Err(String::from_utf8_lossy(&data).into())
++        })
++    }
++}
+diff --git a/src/emulator/lepton.rs b/src/emulator/lepton.rs
+new file mode 100644
+index 0000000..0cf975b
+--- /dev/null
++++ b/src/emulator/lepton.rs
+@@ -0,0 +1,76 @@
++//! The Lepton, in real time: a frame every 115ms (about 8.7 per second). For now it
++//! holds one frame: the first of a CPTV file, or a flat one.
++
++extern crate std;
++use crate::frame_processing::FrameBuffer;
++use crate::tests::mocks::bsp::hal::sio::write_lepton_frame;
++use codec::decode::{CptvDecoder, CptvFrame};
++use std::format;
++use std::path::Path;
++use std::string::String;
++use std::thread;
++use std::time::{Duration, Instant};
++
++const FRAME_INTERVAL: Duration = Duration::from_millis(115);
++/// Raw value of the flat frame, about 17°C for a radiometric Lepton 3.5 (centikelvin).
++const FLAT_FRAME_VALUE: u16 = 29_000;
++
++pub struct Lepton {
++    frame: CptvFrame,
++    frame_num: u32,
++    next_frame: Instant,
++}
++
++impl Lepton {
++    pub fn new(cptv: Option<&Path>) -> Result<Lepton, String> {
++        let frame = match cptv {
++            Some(path) => first_frame(path)?,
++            None => flat_frame(),
++        };
++        Ok(Lepton {
++            frame,
++            frame_num: 0,
++            next_frame: Instant::now(),
++        })
++    }
++
++    pub fn wait_for_next_frame(&mut self) {
++        let now = Instant::now();
++        if self.next_frame > now {
++            thread::sleep(self.next_frame - now);
++            self.next_frame += FRAME_INTERVAL;
++        } else {
++            // The firmware fell behind, or wasn't reading frames: carry on from now,
++            // as the Lepton doesn't wait for it.
++            self.next_frame = now + FRAME_INTERVAL;
++        }
++    }
++
++    pub fn copy_frame(&mut self, frame_buffer: &mut FrameBuffer) {
++        write_lepton_frame(frame_buffer, &self.frame, self.frame_num, false);
++        self.frame_num += 1;
++    }
++}
++
++fn first_frame(path: &Path) -> Result<CptvFrame, String> {
++    let mut decoder = CptvDecoder::<std::fs::File>::from_path(path)
++        .map_err(|e| format!("opening {}: {e:?}", path.display()))?;
++    loop {
++        let frame = decoder
++            .next_frame()
++            .map_err(|e| format!("reading a frame from {}: {e:?}", path.display()))?;
++        if !frame.is_background_frame {
++            return Ok(frame.clone());
++        }
++    }
++}
++
++fn flat_frame() -> CptvFrame {
++    let mut frame = CptvFrame::new();
++    for px in frame.image_data.view_mut(0, 0, 160, 120) {
++        *px = FLAT_FRAME_VALUE;
++    }
++    frame.frame_temp_c = 25.0;
++    frame.last_ffc_temp_c = 25.0;
++    frame
++}
+diff --git a/src/emulator/link.rs b/src/emulator/link.rs
+new file mode 100644
+index 0000000..2b958da
+--- /dev/null
++++ b/src/emulator/link.rs
+@@ -0,0 +1,523 @@
++//! The RP2040 end of tc2-agent's emulated link (`--rp2040-link`, see tc2-agent's
++//! rp2040_link.rs), standing in for the ping line, the SPI bus and the run pin.
++//! tc2-agent is the SPI master, so the RP2040 only answers it. Each message is
++//! `[kind: u8][length: u32 LE][payload]`:
++//!
++//! - `PING` (RP2040 -> agent): a transfer is ready.
++//! - `ACK` (agent -> RP2040): the agent answered the ping.
++//! - `READ` (agent -> RP2040): clock in the u32 LE byte count in the payload,
++//!   answered with `DATA`.
++//! - `DATA` (RP2040 -> agent): the bytes clocked in.
++//! - `WRITE` (agent -> RP2040): bytes clocked out, the reply to a transfer.
++//! - `RESTART` (agent -> RP2040): the run pin was toggled.
++//!
++//! The socket is QEMU's, for the guest's virtio-serial port. It's reconnected
++//! whenever it closes, e.g. while QEMU restarts.
++//!
++//! As on the hardware, where the Pi clocks the SPI bus, the RP2040 doesn't decide
++//! how much of a transfer is read: its DMA sends the buffer for as long as tc2-agent
++//! reads, and the transfer ends when tc2-agent has read it all, moves on (e.g. to
++//! write its reply), or stalls. And tc2-agent's reads always complete: outside a
++//! transfer they get zeros. That matters when the firmware gives
++//! up waiting on a ping that tc2-agent then answers late: tc2-agent reads junk and
++//! moves on, rather than waiting on bytes that never come.
++
++extern crate std;
++use byteorder::{ByteOrder, LittleEndian};
++use log::{debug, info, warn};
++use std::io::{Read, Write};
++use std::os::unix::net::UnixStream;
++use std::path::PathBuf;
++use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
++use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
++use std::sync::{Arc, Mutex};
++use std::thread;
++use std::time::{Duration, Instant};
++use std::vec::Vec;
++
++const PING: u8 = 1;
++const ACK: u8 = 2;
++const READ: u8 = 3;
++const DATA: u8 = 4;
++const WRITE: u8 = 5;
++const RESTART: u8 = 6;
++
++// Where the link is in a transfer, shared with the reader thread.
++const IDLE: u8 = 0;
++/// A ping was sent and the firmware is waiting for the ACK.
++const PINGING: u8 = 1;
++/// tc2-agent acknowledged the ping, and reads until the transfer ends.
++const IN_TRANSFER: u8 = 2;
++
++/// How long tc2-agent may take to start reading after its ACK, or to reply.
++const TRANSFER_TIMEOUT: Duration = Duration::from_secs(5);
++/// A gap between tc2-agent's reads this long ends the transfer, as the firmware
++/// aborts a stalled DMA transfer.
++const STALL_TIMEOUT: Duration = Duration::from_millis(500);
++
++pub struct Link {
++    /// The current connection's write half, if connected.
++    writer: Arc<Mutex<Option<UnixStream>>>,
++    messages: Receiver<(u8, Vec<u8>)>,
++    restart: Arc<AtomicBool>,
++    /// [`IDLE`], [`PINGING`] or [`IN_TRANSFER`]. Outside a transfer, the reader
++    /// answers reads itself and drops late ACKs.
++    state: Arc<AtomicU8>,
++    /// A message that ended a transfer, for the next [`Link::receive`].
++    pending: Option<(u8, Vec<u8>)>,
++}
++
++impl Link {
++    pub fn connect(socket: PathBuf) -> Link {
++        let writer = Arc::new(Mutex::new(None));
++        let restart = Arc::new(AtomicBool::new(false));
++        let (tx, messages) = channel();
++        let state = Arc::new(AtomicU8::new(IDLE));
++        let reader = Reader {
++            writer: writer.clone(),
++            messages: tx,
++            restart: restart.clone(),
++            state: state.clone(),
++        };
++        thread::spawn(move || reader.keep_connected(&socket));
++        Link {
++            writer,
++            messages,
++            restart,
++            state,
++            pending: None,
++        }
++    }
++
++    /// Whether tc2-agent asked for a restart since the last call.
++    pub fn take_restart(&self) -> bool {
++        self.restart.swap(false, Ordering::SeqCst)
++    }
++
++    fn send(&self, kind: u8, payload: &[u8]) -> bool {
++        send(&self.writer, kind, payload)
++    }
++
++    /// The next message from tc2-agent before `deadline`, other than a restart,
++    /// which is flagged for [`Link::take_restart`] and ends the wait.
++    fn receive(&mut self, deadline: Instant) -> Option<(u8, Vec<u8>)> {
++        if let Some(message) = self.pending.take() {
++            return Some(message);
++        }
++        let timeout = deadline.saturating_duration_since(Instant::now());
++        match self.messages.recv_timeout(timeout) {
++            Ok((RESTART, _)) => {
++                self.restart.store(true, Ordering::SeqCst);
++                None
++            }
++            Ok(message) => Some(message),
++            Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => None,
++        }
++    }
++
++    /// Pings tc2-agent; true if it acknowledged within `wait`.
++    pub fn ping(&mut self, wait: Duration) -> bool {
++        // Anything left over belongs to a transfer that was given up on.
++        self.state.store(IDLE, Ordering::SeqCst);
++        self.pending = None;
++        while let Ok((kind, payload)) = self.messages.try_recv() {
++            match kind {
++                RESTART => {
++                    self.restart.store(true, Ordering::SeqCst);
++                    return false;
++                }
++                READ => {
++                    debug!("Answering a stale read from tc2-agent with zeros");
++                    if !self.send(DATA, &zeros(&payload)) {
++                        return false;
++                    }
++                }
++                _ => debug!("Dropping stale message {kind} from tc2-agent"),
++            }
++        }
++        self.state.store(PINGING, Ordering::SeqCst);
++        if !self.send(PING, &[]) {
++            self.state.store(IDLE, Ordering::SeqCst);
++            return false;
++        }
++        let deadline = Instant::now() + wait;
++        loop {
++            match self.receive(deadline) {
++                Some((ACK, _)) => return true,
++                Some((kind, _)) => warn!("Expected ACK from tc2-agent, got {kind}"),
++                None => break,
++            }
++        }
++        // Give up, unless the ACK came in just now.
++        if self
++            .state
++            .compare_exchange(PINGING, IDLE, Ordering::SeqCst, Ordering::SeqCst)
++            .is_ok()
++            || self.restart.load(Ordering::SeqCst)
++        {
++            return false;
++        }
++        matches!(
++            self.receive(Instant::now() + TRANSFER_TIMEOUT),
++            Some((ACK, _))
++        )
++    }
++
++    /// Answers tc2-agent's reads with `bytes`, the transfer the firmware's DMA
++    /// would send, until the transfer ends (see the module docs). Reads past the end
++    /// of `bytes` get zeros.
++    pub fn serve_reads(&mut self, bytes: &[u8]) {
++        self.serve_transfer_reads(bytes);
++        self.state.store(IDLE, Ordering::SeqCst);
++    }
++
++    fn serve_transfer_reads(&mut self, bytes: &[u8]) {
++        let mut cursor = 0;
++        let mut wait = TRANSFER_TIMEOUT;
++        while cursor < bytes.len() {
++            match self.receive(Instant::now() + wait) {
++                Some((READ, count)) => {
++                    let count = zeros(&count).len();
++                    let mut data =
++                        bytes[cursor.min(bytes.len())..(cursor + count).min(bytes.len())].to_vec();
++                    data.resize(count, 0);
++                    cursor += count;
++                    if !self.send(DATA, &data) {
++                        return;
++                    }
++                    wait = STALL_TIMEOUT;
++                }
++                Some(message) => {
++                    // tc2-agent has read what it wanted, e.g. it's replying.
++                    self.pending = Some(message);
++                    return;
++                }
++                None => {
++                    debug!(
++                        "tc2-agent stopped reading at {cursor} of {} bytes",
++                        bytes.len()
++                    );
++                    return;
++                }
++            }
++        }
++    }
++
++    /// Fills `dst` with tc2-agent's reply to the transfer just read, or zeros (an
++    /// invalid reply) if none comes.
++    pub fn receive_write(&mut self, dst: &mut [u8]) {
++        dst.fill(0);
++        match self.receive(Instant::now() + TRANSFER_TIMEOUT) {
++            Some((WRITE, reply)) => {
++                let n = reply.len().min(dst.len());
++                dst[..n].copy_from_slice(&reply[..n]);
++            }
++            Some((kind, _)) => warn!("Expected WRITE from tc2-agent, got {kind}"),
++            None => debug!("No reply from tc2-agent"),
++        }
++    }
++}
++
++fn send(writer: &Mutex<Option<UnixStream>>, kind: u8, payload: &[u8]) -> bool {
++    let mut writer = writer.lock().unwrap();
++    let Some(stream) = writer.as_mut() else {
++        return false;
++    };
++    let mut message = Vec::with_capacity(5 + payload.len());
++    message.push(kind);
++    let mut length = [0u8; 4];
++    #[allow(clippy::cast_possible_truncation)]
++    LittleEndian::write_u32(&mut length, payload.len() as u32);
++    message.extend_from_slice(&length);
++    message.extend_from_slice(payload);
++    stream.write_all(&message).is_ok()
++}
++
++/// Reads tc2-agent's messages from the socket for [`Link`].
++struct Reader {
++    writer: Arc<Mutex<Option<UnixStream>>>,
++    messages: Sender<(u8, Vec<u8>)>,
++    restart: Arc<AtomicBool>,
++    state: Arc<AtomicU8>,
++}
++
++impl Reader {
++    fn keep_connected(&self, socket: &PathBuf) {
++        loop {
++            let mut stream = match UnixStream::connect(socket) {
++                Ok(stream) => stream,
++                Err(e) => {
++                    debug!("Connecting to {}: {e}", socket.display());
++                    thread::sleep(Duration::from_secs(1));
++                    continue;
++                }
++            };
++            info!(
++                "Connected to the guest's rp2040 port at {}",
++                socket.display()
++            );
++            *self.writer.lock().unwrap() = stream.try_clone().ok();
++            while let Some((kind, payload)) = read_message(&mut stream) {
++                if !self.handle(kind, payload) {
++                    return;
++                }
++            }
++            info!("Guest's rp2040 port closed");
++            *self.writer.lock().unwrap() = None;
++        }
++    }
++
++    /// False once the [`Link`] is gone.
++    fn handle(&self, kind: u8, payload: Vec<u8>) -> bool {
++        match kind {
++            RESTART => self.restart.store(true, Ordering::SeqCst),
++            // tc2-agent's reads follow its ACK, so start the transfer here, before
++            // they can arrive. An ACK of a ping the firmware gave up on is dropped.
++            ACK => {
++                if self
++                    .state
++                    .compare_exchange(PINGING, IN_TRANSFER, Ordering::SeqCst, Ordering::SeqCst)
++                    .is_err()
++                {
++                    debug!("Dropping a late ACK from tc2-agent");
++                    return true;
++                }
++            }
++            READ if self.state.load(Ordering::SeqCst) != IN_TRANSFER => {
++                debug!("Answering a read outside a transfer with zeros");
++                send(&self.writer, DATA, &zeros(&payload));
++                return true;
++            }
++            _ => {}
++        }
++        self.messages.send((kind, payload)).is_ok()
++    }
++}
++
++fn read_message(stream: &mut UnixStream) -> Option<(u8, Vec<u8>)> {
++    let mut header = [0u8; 5];
++    stream.read_exact(&mut header).ok()?;
++    let mut payload = std::vec![0u8; LittleEndian::read_u32(&header[1..5]) as usize];
++    stream.read_exact(&mut payload).ok()?;
++    Some((header[0], payload))
++}
++
++/// Zeros for a `READ` of the byte count in `payload`.
++fn zeros(payload: &[u8]) -> Vec<u8> {
++    let count = if payload.len() == 4 {
++        LittleEndian::read_u32(payload) as usize
++    } else {
++        0
++    };
++    std::vec![0u8; count]
++}
++
++#[cfg(test)]
++mod tests {
++    //! The test plays tc2-agent's end of the link.
++    use super::*;
++    use std::os::unix::net::UnixListener;
++
++    struct Agent {
++        stream: UnixStream,
++    }
++
++    impl Agent {
++        fn send(&mut self, kind: u8, payload: &[u8]) {
++            let mut message = std::vec![kind];
++            message.extend_from_slice(&u32::try_from(payload.len()).unwrap().to_le_bytes());
++            message.extend_from_slice(payload);
++            self.stream.write_all(&message).unwrap();
++        }
++
++        fn expect(&mut self, kind: u8) -> Vec<u8> {
++            let (got, payload) = read_message(&mut self.stream).expect("message from the RP2040");
++            assert_eq!(got, kind, "message kind");
++            payload
++        }
++
++        fn read(&mut self, count: u32) -> Vec<u8> {
++            self.send(READ, &count.to_le_bytes());
++            self.expect(DATA)
++        }
++
++        fn expect_nothing(&mut self) {
++            self.stream.set_nonblocking(true).unwrap();
++            let mut byte = [0u8; 1];
++            assert!(
++                self.stream.read(&mut byte).is_err(),
++                "unexpected message from the RP2040"
++            );
++            self.stream.set_nonblocking(false).unwrap();
++        }
++    }
++
++    fn connected() -> (Link, Agent) {
++        let dir = std::env::temp_dir().join(std::format!(
++            "tc2-firmware-emu-link-{}-{:?}",
++            std::process::id(),
++            thread::current().id()
++        ));
++        let _ = std::fs::remove_dir_all(&dir);
++        std::fs::create_dir_all(&dir).unwrap();
++        let socket = dir.join("rp2040.sock");
++        let listener = UnixListener::bind(&socket).unwrap();
++        let link = Link::connect(socket);
++        let (stream, _) = listener.accept().unwrap();
++        stream
++            .set_read_timeout(Some(Duration::from_secs(5)))
++            .unwrap();
++        // The link is usable once its reader has registered the connection.
++        while link.writer.lock().unwrap().is_none() {
++            thread::sleep(Duration::from_millis(1));
++        }
++        (link, Agent { stream })
++    }
++
++    /// The transfer header: type, length and CRC, each twice.
++    const HEADER_LENGTH: usize = 18;
++
++    /// A transfer as the firmware's DMA sends it: header, then `payload_length`
++    /// bytes, then the rest of the buffer.
++    fn transfer(payload_length: u32) -> Vec<u8> {
++        let mut bytes = std::vec![0x42u8; HEADER_LENGTH + payload_length as usize + 100];
++        bytes[0] = 9;
++        bytes[1] = 9;
++        bytes[2..6].copy_from_slice(&payload_length.to_le_bytes());
++        bytes[6..10].copy_from_slice(&payload_length.to_le_bytes());
++        for (i, b) in bytes[HEADER_LENGTH..].iter_mut().enumerate() {
++            *b = (i % 251) as u8;
++        }
++        bytes
++    }
++
++    #[test]
++    fn acknowledged_ping_then_reads_get_the_transfer() {
++        let (mut link, mut agent) = connected();
++        let bytes = transfer(3000);
++        let expected = bytes.clone();
++        let agent = thread::spawn(move || {
++            agent.expect(PING);
++            agent.send(ACK, &[]);
++            // As tc2-agent does: a fixed first read, then the rest of the payload.
++            let first = agent.read(2066);
++            let rest = agent.read(3018 - 2066);
++            agent.send(WRITE, &[1, 2, 3, 4]);
++            (first, rest)
++        });
++        assert!(link.ping(Duration::from_secs(1)));
++        link.serve_reads(&bytes);
++        let mut reply = [0u8; 8];
++        link.receive_write(&mut reply);
++        let (first, rest) = agent.join().unwrap();
++        assert_eq!(first, expected[..2066]);
++        assert_eq!(rest, expected[2066..3018]);
++        assert_eq!(reply, [1, 2, 3, 4, 0, 0, 0, 0]);
++    }
++
++    #[test]
++    fn reads_past_a_short_transfer_get_zeros() {
++        let (mut link, mut agent) = connected();
++        let bytes = transfer(10);
++        let agent = thread::spawn(move || {
++            agent.expect(PING);
++            agent.send(ACK, &[]);
++            let first = agent.read(2066);
++            // The transfer is over; another read is answered by the reader.
++            let after = agent.read(16);
++            (first, after)
++        });
++        assert!(link.ping(Duration::from_secs(1)));
++        link.serve_reads(&bytes);
++        let (first, after) = agent.join().unwrap();
++        assert_eq!(first[..28], bytes[..28]);
++        assert_eq!(first.len(), 2066);
++        assert_eq!(after, std::vec![0u8; 16]);
++    }
++
++    #[test]
++    fn late_ack_of_an_abandoned_ping_is_dropped_and_its_reads_get_zeros() {
++        let (mut link, mut agent) = connected();
++        assert!(!link.ping(Duration::from_millis(20)));
++        agent.expect(PING);
++        // tc2-agent answers the ping after the firmware gave up on it, and reads.
++        agent.send(ACK, &[]);
++        assert_eq!(agent.read(2066), std::vec![0u8; 2066]);
++
++        // The next ping isn't confused by the late ACK.
++        let bytes = transfer(10);
++        let expected = bytes.clone();
++        let agent = thread::spawn(move || {
++            agent.expect(PING);
++            agent.send(ACK, &[]);
++            agent.read(u32::try_from(expected.len()).unwrap())
++        });
++        assert!(link.ping(Duration::from_secs(1)));
++        link.serve_reads(&bytes);
++        assert_eq!(agent.join().unwrap(), bytes);
++    }
++
++    #[test]
++    fn transfer_read_to_the_end_finishes_without_waiting() {
++        // Like a raw frame: tc2-agent reads the whole buffer and writes no reply.
++        let (mut link, mut agent) = connected();
++        let bytes = transfer(39_040);
++        let expected = bytes.clone();
++        let total = u32::try_from(bytes.len()).unwrap();
++        let agent = thread::spawn(move || {
++            agent.expect(PING);
++            agent.send(ACK, &[]);
++            let mut read = agent.read(2066);
++            read.extend(agent.read(total - 2066));
++            read
++        });
++        assert!(link.ping(Duration::from_secs(1)));
++        let started = Instant::now();
++        link.serve_reads(&bytes);
++        assert!(started.elapsed() < STALL_TIMEOUT, "waited for more reads");
++        assert_eq!(agent.join().unwrap(), expected);
++    }
++
++    #[test]
++    fn stalled_transfer_ends_and_later_reads_get_zeros() {
++        let (mut link, mut agent) = connected();
++        let bytes = transfer(39_040);
++        let agent = thread::spawn(move || {
++            agent.expect(PING);
++            agent.send(ACK, &[]);
++            // Reads only the start, then stops.
++            assert_eq!(agent.read(2066).len(), 2066);
++            agent
++        });
++        assert!(link.ping(Duration::from_secs(1)));
++        let started = Instant::now();
++        link.serve_reads(&bytes);
++        assert!(started.elapsed() >= STALL_TIMEOUT);
++        let mut agent = agent.join().unwrap();
++        assert_eq!(agent.read(64), std::vec![0u8; 64]);
++    }
++
++    #[test]
++    fn restart_ends_a_ping_and_is_reported_once() {
++        let (mut link, mut agent) = connected();
++        let agent = thread::spawn(move || {
++            agent.expect(PING);
++            agent.send(RESTART, &[]);
++            agent
++        });
++        assert!(!link.ping(Duration::from_secs(5)));
++        assert!(link.take_restart());
++        assert!(!link.take_restart());
++        agent.join().unwrap().expect_nothing();
++    }
++
++    #[test]
++    fn ping_fails_fast_without_a_connection() {
++        let dir =
++            std::env::temp_dir().join(std::format!("tc2-firmware-emu-none-{}", std::process::id()));
++        let mut link = Link::connect(dir.join("missing.sock"));
++        let started = Instant::now();
++        assert!(!link.ping(Duration::from_secs(5)));
++        assert!(started.elapsed() < Duration::from_secs(1));
++    }
++}
+diff --git a/src/emulator/mod.rs b/src/emulator/mod.rs
+new file mode 100644
+index 0000000..1796ebc
+--- /dev/null
++++ b/src/emulator/mod.rs
+@@ -0,0 +1,199 @@
++//! Runs the firmware in the TC2 emulator's container, next to QEMU, in place of the
++//! RP2040. The firmware is the same code the tests run on the mocked HAL; only the
++//! world outside the RP2040 differs (see `tests::mocks::world`):
++//!
++//! - I2C1, the bus shared with the Pi, goes to the emulator's device models
++//!   (`tc2-emu-hw`), so the firmware and the Pi see the same ATtiny and RTC.
++//! - The SPI link and ping line to the Pi go to a real tc2-agent in the guest, run
++//!   with `--rp2040-link`, over QEMU's socket for a virtio-serial port.
++//! - The Lepton's frames come from a CPTV file.
++//! - Time is real time.
++//!
++//! The RP2040's own peripherals (flash, DMA, PIO) are the mocks the tests use.
++//!
++//! When tc2-agent restarts the RP2040 (by toggling its run pin), the firmware is
++//! stopped at its next HAL call by unwinding with [`Restart`], and starts again from
++//! `real_main`, much as a reset would.
++
++mod hw;
++mod lepton;
++mod link;
++
++extern crate std;
++use crate::entry::real_main;
++use crate::frame_processing::FrameBuffer;
++use crate::tests::mocks::bsp::hal::i2c::I2cError;
++use crate::tests::mocks::world::{World, set_world};
++use crate::tests::test_state::test_global_state::TEST_SIM_STATE;
++use hw::Hw;
++use lepton::Lepton;
++use link::Link;
++use log::{error, info};
++use std::boxed::Box;
++use std::path::PathBuf;
++use std::string::String;
++use std::time::{Duration, Instant};
++use std::{env, panic, process, thread};
++
++/// The panic payload that restarts the firmware.
++pub struct Restart;
++
++struct Options {
++    /// tc2-emu-hw's socket for the RP2040's I2C transactions.
++    hw_socket: PathBuf,
++    /// QEMU's socket for the guest's rp2040 virtio-serial port.
++    link_socket: PathBuf,
++    /// The Lepton holds the first frame of this file; a flat frame if not given.
++    cptv: Option<PathBuf>,
++    /// The shortest time to wait for tc2-agent to answer a ping. The firmware waits
++    /// as little as 300µs, which an emulated Pi can't manage.
++    min_ping_wait: Duration,
++}
++
++const USAGE: &str = "usage: tc2-firmware-emu [--hw-socket PATH] [--link PATH] [--cptv FILE] \
++                     [--min-ping-wait-ms N]";
++
++impl Options {
++    fn parse() -> Options {
++        let mut options = Options {
++            hw_socket: PathBuf::from("/state/hw-rp2040.sock"),
++            link_socket: PathBuf::from("/state/rp2040.sock"),
++            cptv: None,
++            min_ping_wait: Duration::from_millis(200),
++        };
++        let mut args = env::args().skip(1);
++        while let Some(arg) = args.next() {
++            let mut value = || {
++                args.next().unwrap_or_else(|| {
++                    eprintln!("{arg} needs a value\n{USAGE}");
++                    process::exit(2)
++                })
++            };
++            match arg.as_str() {
++                "--hw-socket" => options.hw_socket = value().into(),
++                "--link" => options.link_socket = value().into(),
++                "--cptv" => options.cptv = Some(value().into()),
++                "--min-ping-wait-ms" => {
++                    let ms: String = value();
++                    options.min_ping_wait =
++                        Duration::from_millis(ms.parse().unwrap_or_else(|_| {
++                            eprintln!("--min-ping-wait-ms: not a number: {ms}\n{USAGE}");
++                            process::exit(2)
++                        }));
++                }
++                _ => {
++                    eprintln!("{USAGE}");
++                    process::exit(2)
++                }
++            }
++        }
++        options
++    }
++}
++
++pub fn run() -> ! {
++    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
++    let options = Options::parse();
++    let lepton = Lepton::new(options.cptv.as_deref()).unwrap_or_else(|e| {
++        error!("{e}");
++        process::exit(1)
++    });
++    set_world(Box::new(EmulatorWorld {
++        hw: Hw::new(options.hw_socket),
++        link: Link::connect(options.link_socket),
++        lepton,
++        min_ping_wait: options.min_ping_wait,
++        started: Instant::now(),
++    }));
++
++    let report_panic = panic::take_hook();
++    panic::set_hook(Box::new(move |info| {
++        if !info.payload().is::<Restart>() {
++            report_panic(info);
++        }
++    }));
++    loop {
++        TEST_SIM_STATE.with(|state| state.borrow_mut().reset_rp2040());
++        match panic::catch_unwind(real_main) {
++            Ok(()) => info!("Firmware returned, restarting"),
++            Err(payload) if payload.is::<Restart>() => info!("Restarted by tc2-agent"),
++            // The real RP2040 halts. Exiting makes the failure visible.
++            Err(_) => process::exit(101),
++        }
++    }
++}
++
++struct EmulatorWorld {
++    hw: Hw,
++    link: Link,
++    lepton: Lepton,
++    min_ping_wait: Duration,
++    started: Instant,
++}
++
++impl EmulatorWorld {
++    /// Stops the firmware if tc2-agent has asked for a restart.
++    fn check_restart(&mut self) {
++        if self.link.take_restart() {
++            panic::panic_any(Restart);
++        }
++    }
++}
++
++impl World for EmulatorWorld {
++    fn i2c_write(&mut self, address: u8, payload: &[u8]) -> Result<(), I2cError> {
++        self.check_restart();
++        self.hw.tx(address, payload, 0).map(|_| ())
++    }
++
++    fn i2c_write_read(
++        &mut self,
++        address: u8,
++        request: &[u8],
++        response: &mut [u8],
++    ) -> Result<(), I2cError> {
++        self.check_restart();
++        let data = self.hw.tx(address, request, response.len())?;
++        response.copy_from_slice(&data);
++        Ok(())
++    }
++
++    fn ping_rpi(&mut self, timeout_micros: u32) -> bool {
++        self.check_restart();
++        let wait = Duration::from_micros(u64::from(timeout_micros)).max(self.min_ping_wait);
++        let acknowledged = self.link.ping(wait);
++        self.check_restart();
++        acknowledged
++    }
++
++    fn write_to_rpi(&mut self, bytes: &[u8]) {
++        self.link.serve_reads(bytes);
++        self.check_restart();
++    }
++
++    fn read_from_rpi(&mut self, dst: &mut [u8]) {
++        self.link.receive_write(dst);
++        self.check_restart();
++    }
++
++    #[allow(clippy::cast_possible_truncation)]
++    fn timer_micros(&mut self) -> u64 {
++        self.started.elapsed().as_micros() as u64
++    }
++
++    fn delay_micros(&mut self, micros: u64) {
++        self.check_restart();
++        thread::sleep(Duration::from_micros(micros));
++    }
++
++    fn advance_one_frame(&mut self) {
++        self.check_restart();
++        self.lepton.wait_for_next_frame();
++    }
++
++    fn copy_last_frame(&mut self, frame_buffer: &mut Option<&'static mut FrameBuffer>) {
++        if let Some(frame_buffer) = frame_buffer {
++            self.lepton.copy_frame(frame_buffer);
++        }
++    }
++}
+diff --git a/src/main_emu.rs b/src/main_emu.rs
+new file mode 100644
+index 0000000..199224d
+--- /dev/null
++++ b/src/main_emu.rs
+@@ -0,0 +1,36 @@
++//! The firmware built for the TC2 emulator: it runs on the mocked HAL, like the
++//! tests, but against the emulator's ATtiny and RTC and a real tc2-agent rather
++//! than the tests' simulation. See `emulator/mod.rs`.
++#![warn(clippy::all, clippy::pedantic)]
++mod attiny_rtc_i2c;
++mod audio_task;
++mod byte_slice_cursor;
++mod clock_utils;
++mod constants;
++mod cptv_encoder;
++mod device_config;
++mod emulator;
++mod entry;
++mod event_logger;
++mod ext_spi_transfers;
++mod formatted_time;
++mod frame_processing;
++mod lepton;
++mod lepton_task;
++mod lepton_telemetry;
++mod motion_detector;
++mod onboard_flash;
++mod pdm_filter;
++mod pdm_microphone;
++mod re_exports;
++mod rpi_power;
++mod startup_functions;
++mod sub_tasks;
++mod sun_times;
++mod synced_date_time;
++mod tests;
++mod utils;
++
++fn main() {
++    emulator::run();
++}
+diff --git a/src/tests/helpers.rs b/src/tests/helpers.rs
+index 79e714d..99f81ff 100644
+--- a/src/tests/helpers.rs
++++ b/src/tests/helpers.rs
+@@ -118,8 +118,7 @@ pub fn simulate_camera_with_config(
+     loop {
+         let now = TEST_SIM_STATE.with(|state| {
+             let mut state = state.borrow_mut();
+-            // Reset ROSC_ITERATOR:
+-            state.rosc_drive_iterator = 0;
++            state.reset_rp2040();
+ 
+             if let Some(fw) = &state.firmware_device_config {
+                 // In continuous mode, always update the window
+diff --git a/src/tests/mocks/bsp/hal/i2c.rs b/src/tests/mocks/bsp/hal/i2c.rs
+index 8636c89..6152272 100644
+--- a/src/tests/mocks/bsp/hal/i2c.rs
++++ b/src/tests/mocks/bsp/hal/i2c.rs
+@@ -7,6 +7,7 @@ use crate::attiny_rtc_i2c::{
+ use crate::formatted_time::FormattedNZTime;
+ use crate::re_exports::bsp::pac::{I2C0, I2C1, RESETS};
+ use crate::re_exports::log::{debug, error, info, warn};
++use crate::tests::mocks::world::with_world;
+ use crate::tests::test_state::test_global_state::TEST_SIM_STATE;
+ use byteorder::{BigEndian, ByteOrder};
+ use chrono::{Datelike, NaiveDate, NaiveDateTime, NaiveTime, Timelike};
+@@ -90,6 +91,32 @@ impl<A, B> I2C<I2C1, (A, B)> {
+     }
+ 
+     pub fn write(&mut self, address: u8, payload: &[u8]) -> Result<(), I2cError> {
++        with_world(|world| world.i2c_write(address, payload))
++    }
++
++    pub fn write_read(
++        &mut self,
++        address: u8,
++        request: &[u8],
++        payload: &mut [u8],
++    ) -> Result<(), I2cError> {
++        with_world(|world| world.i2c_write_read(address, request, payload))
++    }
++
++    pub fn read(&mut self, _address: u8, _buffer: &mut [u8]) -> Result<(), I2cError> {
++        Ok(())
++    }
++
++    pub fn tx_fifo_used(&self) -> u32 {
++        0
++    }
++}
++
++/// The simulated ATtiny and RTC, for [`crate::tests::mocks::world::SimulatedWorld`].
++pub(crate) mod simulated {
++    use super::*;
++
++    pub(crate) fn write(address: u8, payload: &[u8]) -> Result<(), I2cError> {
+         // NOTE: In between writes we might want to advance the state of the external simulated devices.
+ 
+         // We might actually want to write a state to some external device (rpi power on state)
+@@ -199,8 +226,7 @@ impl<A, B> I2C<I2C1, (A, B)> {
+         Ok(())
+     }
+ 
+-    pub fn write_read(
+-        &mut self,
++    pub(crate) fn write_read(
+         address: u8,
+         request: &[u8],
+         payload: &mut [u8],
+@@ -342,11 +368,4 @@ impl<A, B> I2C<I2C1, (A, B)> {
+         }
+         Ok(())
+     }
+-    pub fn read(&mut self, _address: u8, _buffer: &mut [u8]) -> Result<(), I2cError> {
+-        Ok(())
+-    }
+-
+-    pub fn tx_fifo_used(&self) -> u32 {
+-        0
+-    }
+ }
+diff --git a/src/tests/mocks/bsp/hal/mod.rs b/src/tests/mocks/bsp/hal/mod.rs
+index 3757de8..d2752ee 100644
+--- a/src/tests/mocks/bsp/hal/mod.rs
++++ b/src/tests/mocks/bsp/hal/mod.rs
+@@ -5,37 +5,33 @@ pub mod spi;
+ 
+ use crate::re_exports::bsp::hal::clocks::ClocksManager;
+ use crate::re_exports::bsp::pac::{RESETS, TIMER};
++use crate::tests::mocks::world::with_world;
+ use fugit::{HertzU32, TimerInstantU64};
+ 
+ pub type Instant = TimerInstantU64<1_000_000>;
+ 
+ pub mod timer {
+     pub use crate::re_exports::bsp::hal::Instant;
+-    use crate::tests::test_state::test_global_state::TEST_SIM_STATE;
++    use crate::tests::mocks::world::with_world;
++    use core::cell::Cell;
+     use fugit::MicrosDurationU32;
+ 
++    std::thread_local! {
++        static ALARM_TIMEOUT_MICROS: Cell<u32> = const { Cell::new(0) };
++    }
++
++    /// The firmware only uses the alarm as the timeout while it pings the Pi, so
++    /// `finished` means the Pi didn't answer the ping in time.
+     pub trait Alarm {
+-        fn schedule(&self, _when: MicrosDurationU32) -> Result<(), ()> {
++        fn schedule(&self, when: MicrosDurationU32) -> Result<(), ()> {
++            ALARM_TIMEOUT_MICROS.with(|t| t.set(when.to_micros()));
+             Ok(())
+         }
+ 
+         fn enable_interrupt(&self) {}
+         fn finished(&self) -> bool {
+-            TEST_SIM_STATE.with(|s| {
+-                let s = s.borrow();
+-                if s.offloads_fail_on_restart_iteration
+-                    .is_some_and(|r| r == s.restart_num)
+-                {
+-                    // The pi fails to respond during this restart iteration for test purposes.
+-                    return true;
+-                }
+-                if s.camera_state.pi_is_powered_on() {
+-                    // Pi is ready to receive
+-                    !s.tc2_agent_state.is_ready()
+-                } else {
+-                    true
+-                }
+-            })
++            let timeout = ALARM_TIMEOUT_MICROS.with(Cell::get);
++            !with_world(|world| world.ping_rpi(timeout))
+         }
+         fn clear_interrupt(&self) {}
+         fn cancel(&self) {}
+@@ -57,15 +53,14 @@ impl Timer {
+     }
+ 
+     pub fn get_counter(&self) -> Instant {
+-        // TODO: Need to make counter increase?
+-        TimerInstantU64::from_ticks(self.counter)
++        TimerInstantU64::from_ticks(self.counter + with_world(|world| world.timer_micros()))
+     }
+ 
+-    pub fn delay_us(&mut self, _micros: u32) {
+-        //info!("Delaying for {}µs", micros);
++    pub fn delay_us(&mut self, micros: u32) {
++        with_world(|world| world.delay_micros(u64::from(micros)));
+     }
+-    pub fn delay_ms(&self, _ms: u64) {
+-        //info!("Delaying for {}ms", ms);
++    pub fn delay_ms(&self, ms: u64) {
++        with_world(|world| world.delay_micros(ms * 1000));
+     }
+ 
+     pub fn alarm_0(&mut self) -> Option<timer::Alarm0> {
+@@ -665,7 +660,7 @@ pub mod dma {
+         use crate::re_exports::bsp::hal::dma::{CH0, Channel};
+         use crate::re_exports::bsp::hal::pio::{SM0, Tx};
+         use crate::re_exports::bsp::pac::PIO0;
+-        use crate::tests::mocks::fake_shared_spi::{read_from_rpi, write_to_rpi};
++        use crate::tests::mocks::world::with_world;
+ 
+         pub trait TransferExt {
+             type Channel;
+@@ -762,7 +757,7 @@ pub mod dma {
+                 use crate::tests::test_state::test_global_state::TEST_SIM_STATE;
+                 let end = ReadAddress::end_address(&self.rx);
+                 TEST_SIM_STATE.with(|s| s.borrow_mut().dma_read_address = end);
+-                let _ = write_to_rpi(bytemuck::cast_slice(self.rx));
++                with_world(|world| world.write_to_rpi(bytemuck::cast_slice(self.rx)));
+                 (self.ch, self.rx, self.tx)
+             }
+         }
+@@ -781,7 +776,7 @@ pub mod dma {
+             }
+ 
+             fn wait(self) -> (Self::Channel, Self::RX, Self::TX) {
+-                let _ = write_to_rpi(self.rx);
++                with_world(|world| world.write_to_rpi(self.rx.as_slice()));
+                 (self.ch, self.rx, self.tx)
+             }
+         }
+@@ -800,7 +795,7 @@ pub mod dma {
+             }
+ 
+             fn wait(self) -> (Self::Channel, Self::RX, Self::TX) {
+-                let _ = read_from_rpi(self.tx);
++                with_world(|world| world.read_from_rpi(self.tx.as_mut_slice()));
+                 (self.ch, self.rx, self.tx)
+             }
+         }
+diff --git a/src/tests/mocks/bsp/hal/sio.rs b/src/tests/mocks/bsp/hal/sio.rs
+index a9c80d4..ab36591 100644
+--- a/src/tests/mocks/bsp/hal/sio.rs
++++ b/src/tests/mocks/bsp/hal/sio.rs
+@@ -3,10 +3,11 @@ use crate::frame_processing::FrameBuffer;
+ use crate::re_exports::log::info;
+ use byteorder::{ByteOrder, LittleEndian};
+ use chrono::{Datelike, Duration, NaiveDate, NaiveDateTime, NaiveTime};
+-use codec::decode::CptvDecoder;
++use codec::decode::{CptvDecoder, CptvFrame};
+ extern crate std;
+ use crate::attiny_rtc_i2c::decode_bcd;
+ use crate::formatted_time::FormattedNZTime;
++use crate::tests::mocks::world::with_world;
+ use crate::tests::test_state::test_global_state::TEST_SIM_STATE;
+ use log::{error, warn};
+ use std::collections::VecDeque;
+@@ -32,7 +33,7 @@ impl SioFifo {
+     }
+ 
+     pub fn next_frame(&mut self) {
+-        advance_one_frame();
++        with_world(|world| world.advance_one_frame());
+         // TODO, if the current timestamp is a recording time, advance cptv frame, otherwise use static frame.
+ 
+         self.inner.push_back(0xae);
+@@ -219,48 +220,58 @@ pub fn copy_last_frame(frame_buffer: &mut Option<&'static mut FrameBuffer>) {
+             let mut s = s.borrow_mut();
+             let mut frame_num = s.frame_num;
+             if let Some(frame) = s.last_frame.as_ref() {
+-                let header = frame_buffer.frame_data_as_u8_slice_mut();
+-                // Telemetry revision
+-                LittleEndian::write_u16(&mut header[0..2], 14);
+-                // Frame number
+-                LittleEndian::write_u32(&mut header[40..44], frame_num);
++                let misaligned = s
++                    .invalid_frame_every
++                    .is_some_and(|n| frame_num % n == n / 2);
++                write_lepton_frame(frame_buffer, frame, frame_num, misaligned);
++                frame_num += 1;
++            }
++            s.frame_num = frame_num;
++        });
++    }
++}
+ 
+-                // Msec on:
+-                let msec_on = frame_num * 115;
+-                LittleEndian::write_u32(&mut header[2..6], msec_on);
++/// Fills `frame_buffer` with `frame` as the Lepton sends it: two rows of telemetry,
++/// then the pixels. A `misaligned` frame has a telemetry revision that doesn't match
++/// the earlier frames, and garbage pixels.
++pub fn write_lepton_frame(
++    frame_buffer: &mut FrameBuffer,
++    frame: &CptvFrame,
++    frame_num: u32,
++    misaligned: bool,
++) {
++    let header = frame_buffer.frame_data_as_u8_slice_mut();
++    // Telemetry revision
++    LittleEndian::write_u16(&mut header[0..2], 14);
++    // Frame number
++    LittleEndian::write_u32(&mut header[40..44], frame_num);
+ 
+-                let adjusted_time_since_last_ffc =
+-                    msec_on.saturating_sub(frame.time_on.saturating_sub(frame.last_ffc_time));
+-                // Time at last FFC:
+-                LittleEndian::write_u32(&mut header[60..64], adjusted_time_since_last_ffc);
++    // Msec on:
++    let msec_on = frame_num * 115;
++    LittleEndian::write_u32(&mut header[2..6], msec_on);
+ 
+-                // Always just say FFC is done
+-                // status_bits
+-                LittleEndian::write_u32(&mut header[6..10], 3 << 4);
+-                let fpa_temp_kelvin_x_100 = ((frame.frame_temp_c + 273.15) * 100.0) as u16;
+-                LittleEndian::write_u16(&mut header[48..=49], fpa_temp_kelvin_x_100);
++    let adjusted_time_since_last_ffc =
++        msec_on.saturating_sub(frame.time_on.saturating_sub(frame.last_ffc_time));
++    // Time at last FFC:
++    LittleEndian::write_u32(&mut header[60..64], adjusted_time_since_last_ffc);
+ 
+-                let fpa_temp_kelvin_x_100_at_last_ffc =
+-                    ((frame.last_ffc_temp_c + 273.15) * 100.0) as u16;
+-                LittleEndian::write_u16(&mut header[58..=59], fpa_temp_kelvin_x_100_at_last_ffc);
++    // Always just say FFC is done
++    // status_bits
++    LittleEndian::write_u32(&mut header[6..10], 3 << 4);
++    let fpa_temp_kelvin_x_100 = ((frame.frame_temp_c + 273.15) * 100.0) as u16;
++    LittleEndian::write_u16(&mut header[48..=49], fpa_temp_kelvin_x_100);
+ 
+-                header[640..][0..(FRAME_WIDTH * FRAME_HEIGHT) * 2]
+-                    .copy_from_slice(frame.image_data.as_slice());
+-                if s.invalid_frame_every
+-                    .is_some_and(|n| frame_num % n == n / 2)
+-                {
+-                    // A misaligned frame: the telemetry revision doesn't match the earlier frames,
+-                    // and the pixels are garbage.
+-                    LittleEndian::write_u16(&mut header[0..2], 13);
+-                    for px in header[640..][0..(FRAME_WIDTH * FRAME_HEIGHT) * 2].chunks_exact_mut(2)
+-                    {
+-                        let value = LittleEndian::read_u16(px).saturating_add(1000);
+-                        LittleEndian::write_u16(px, value);
+-                    }
+-                }
+-                frame_num += 1;
+-            }
+-            s.frame_num = frame_num;
+-        });
++    let fpa_temp_kelvin_x_100_at_last_ffc = ((frame.last_ffc_temp_c + 273.15) * 100.0) as u16;
++    LittleEndian::write_u16(&mut header[58..=59], fpa_temp_kelvin_x_100_at_last_ffc);
++
++    header[640..][0..(FRAME_WIDTH * FRAME_HEIGHT) * 2].copy_from_slice(frame.image_data.as_slice());
++    if misaligned {
++        // A misaligned frame: the telemetry revision doesn't match the earlier frames,
++        // and the pixels are garbage.
++        LittleEndian::write_u16(&mut header[0..2], 13);
++        for px in header[640..][0..(FRAME_WIDTH * FRAME_HEIGHT) * 2].chunks_exact_mut(2) {
++            let value = LittleEndian::read_u16(px).saturating_add(1000);
++            LittleEndian::write_u16(px, value);
++        }
+     }
+ }
+diff --git a/src/tests/mocks/fake_critical_section.rs b/src/tests/mocks/fake_critical_section.rs
+index 5d1bb74..a22b6d8 100644
+--- a/src/tests/mocks/fake_critical_section.rs
++++ b/src/tests/mocks/fake_critical_section.rs
+@@ -26,7 +26,7 @@ where
+ }
+ 
+ use crate::frame_processing::FrameBuffer;
+-use crate::re_exports::bsp::hal::sio::copy_last_frame;
++use crate::tests::mocks::world::with_world;
+ use core::cell::{Ref, RefCell, RefMut, UnsafeCell};
+ 
+ #[derive(Debug)]
+@@ -67,7 +67,7 @@ impl Mutex<RefCell<Option<&'static mut FrameBuffer>>> {
+         cs: CriticalSection<'cs>,
+     ) -> RefMut<'cs, Option<&'static mut FrameBuffer>> {
+         let mut fb = self.borrow(cs).borrow_mut();
+-        copy_last_frame(&mut fb);
++        with_world(|world| world.copy_last_frame(&mut fb));
+         fb
+     }
+ }
+diff --git a/src/tests/mocks/fake_shared_spi.rs b/src/tests/mocks/fake_shared_spi.rs
+index 06bb40f..19d55f1 100644
+--- a/src/tests/mocks/fake_shared_spi.rs
++++ b/src/tests/mocks/fake_shared_spi.rs
+@@ -1057,6 +1057,21 @@ pub fn write_to_rpi(bytes: &[u8]) -> Result<(), ()> {
+     }
+     Ok(())
+ }
++/// Whether the simulated tc2-agent answers a ping: it does once the Pi is on and
++/// tc2-agent is ready.
++pub(crate) fn simulated_rpi_answers_ping() -> bool {
++    TEST_SIM_STATE.with(|s| {
++        let s = s.borrow();
++        if s.offloads_fail_on_restart_iteration
++            .is_some_and(|r| r == s.restart_num)
++        {
++            // The pi fails to respond during this restart iteration for test purposes.
++            return false;
++        }
++        s.camera_state.pi_is_powered_on() && s.tc2_agent_state.is_ready()
++    })
++}
++
+ pub fn read_from_rpi(dst: &mut [u8]) -> Result<(), ()> {
+     TEST_SIM_STATE.with(|state| {
+         let state = state.borrow();
+diff --git a/src/tests/mocks/mod.rs b/src/tests/mocks/mod.rs
+index d21d1f0..c617d6b 100644
+--- a/src/tests/mocks/mod.rs
++++ b/src/tests/mocks/mod.rs
+@@ -6,3 +6,4 @@ pub mod fake_rpi_event_logger;
+ pub mod fake_rpi_recording_state;
+ pub mod fake_rpi_test_recording_status;
+ pub mod fake_shared_spi;
++pub mod world;
+diff --git a/src/tests/mocks/world.rs b/src/tests/mocks/world.rs
+new file mode 100644
+index 0000000..b9f8ff2
+--- /dev/null
++++ b/src/tests/mocks/world.rs
+@@ -0,0 +1,112 @@
++//! Everything outside the RP2040 that the mocked HAL talks to: the devices on the
++//! shared I2C bus (ATtiny and RTC), the Raspberry Pi on the other end of the SPI
++//! link, the Lepton, and the passage of time.
++//!
++//! The mocks call through [`with_world`], so the same firmware build can run against
++//! different worlds. The default, [`SimulatedWorld`], is the in-process simulation
++//! the tests use, driven by `TEST_SIM_STATE`. The emulator (`tc2-firmware-emu`)
++//! installs its own with [`set_world`], backed by emulated hardware and a real
++//! tc2-agent.
++//!
++//! The RP2040's own peripherals (flash, DMA, PIO) stay in the mocks, so they behave
++//! the same in every world.
++
++extern crate std;
++use crate::frame_processing::FrameBuffer;
++use crate::tests::mocks::bsp::hal::i2c::{self, I2cError};
++use crate::tests::mocks::bsp::hal::sio;
++use crate::tests::mocks::fake_shared_spi;
++use std::boxed::Box;
++use std::cell::RefCell;
++
++pub trait World {
++    /// An I2C write on the bus shared with the Pi (I2C1).
++    fn i2c_write(&mut self, address: u8, payload: &[u8]) -> Result<(), I2cError>;
++
++    /// An I2C write, then a read of `response.len()` bytes, on I2C1.
++    fn i2c_write_read(
++        &mut self,
++        address: u8,
++        request: &[u8],
++        response: &mut [u8],
++    ) -> Result<(), I2cError>;
++
++    /// Signals the Pi that a transfer is ready. True if tc2-agent acknowledged it
++    /// within `timeout_micros`.
++    fn ping_rpi(&mut self, timeout_micros: u32) -> bool;
++
++    /// Bytes the Pi clocks out of the RP2040 after a successful ping.
++    fn write_to_rpi(&mut self, bytes: &[u8]);
++
++    /// The Pi's reply to the last transfer.
++    fn read_from_rpi(&mut self, dst: &mut [u8]);
++
++    /// The RP2040's microsecond timer.
++    fn timer_micros(&mut self) -> u64;
++
++    fn delay_micros(&mut self, micros: u64);
++
++    /// Waits for the Lepton's next frame.
++    fn advance_one_frame(&mut self);
++
++    /// Copies the current Lepton frame (telemetry and pixels) into `frame_buffer`.
++    fn copy_last_frame(&mut self, frame_buffer: &mut Option<&'static mut FrameBuffer>);
++}
++
++/// The tests' simulation: devices, Pi and Lepton are all faked in `TEST_SIM_STATE`,
++/// and time only moves forward one Lepton frame at a time.
++pub struct SimulatedWorld;
++
++impl World for SimulatedWorld {
++    fn i2c_write(&mut self, address: u8, payload: &[u8]) -> Result<(), I2cError> {
++        i2c::simulated::write(address, payload)
++    }
++
++    fn i2c_write_read(
++        &mut self,
++        address: u8,
++        request: &[u8],
++        response: &mut [u8],
++    ) -> Result<(), I2cError> {
++        i2c::simulated::write_read(address, request, response)
++    }
++
++    fn ping_rpi(&mut self, _timeout_micros: u32) -> bool {
++        fake_shared_spi::simulated_rpi_answers_ping()
++    }
++
++    fn write_to_rpi(&mut self, bytes: &[u8]) {
++        let _ = fake_shared_spi::write_to_rpi(bytes);
++    }
++
++    fn read_from_rpi(&mut self, dst: &mut [u8]) {
++        let _ = fake_shared_spi::read_from_rpi(dst);
++    }
++
++    fn timer_micros(&mut self) -> u64 {
++        0
++    }
++
++    fn delay_micros(&mut self, _micros: u64) {}
++
++    fn advance_one_frame(&mut self) {
++        sio::advance_one_frame();
++    }
++
++    fn copy_last_frame(&mut self, frame_buffer: &mut Option<&'static mut FrameBuffer>) {
++        sio::copy_last_frame(frame_buffer);
++    }
++}
++
++std::thread_local! {
++    static WORLD: RefCell<Box<dyn World>> = RefCell::new(Box::new(SimulatedWorld));
++}
++
++/// Replaces the world for the current thread, which the firmware runs on.
++pub fn set_world(world: Box<dyn World>) {
++    WORLD.with(|w| *w.borrow_mut() = world);
++}
++
++pub fn with_world<R>(f: impl FnOnce(&mut dyn World) -> R) -> R {
++    WORLD.with(|w| f(w.borrow_mut().as_mut()))
++}
+diff --git a/src/tests/mod.rs b/src/tests/mod.rs
+index fef98c4..c125c21 100644
+--- a/src/tests/mod.rs
++++ b/src/tests/mod.rs
+@@ -1,7 +1,11 @@
+-#![cfg(test)]
++// The mocks build with the `std` feature, for the tests and for the emulator
++// (`tc2-firmware-emu`); the tests themselves only build under `cargo test`.
++#![cfg(feature = "std")]
++#[cfg(test)]
+ mod helpers;
+ pub mod mocks;
++#[cfg(test)]
+ mod scheduled_alarm;
+ pub(crate) mod test_state;
++#[cfg(test)]
+ mod testing;
+-extern crate std;
+diff --git a/src/tests/test_state/test_global_state.rs b/src/tests/test_state/test_global_state.rs
+index d32918b..612299f 100644
+--- a/src/tests/test_state/test_global_state.rs
++++ b/src/tests/test_state/test_global_state.rs
+@@ -92,6 +92,12 @@ pub struct SimState {
+ }
+ 
+ impl SimState {
++    /// Resets the state of the RP2040's own peripherals that doesn't survive a
++    /// restart of the firmware.
++    pub fn reset_rp2040(&mut self) {
++        self.rosc_drive_iterator = 0;
++    }
++
+     pub fn update_camera_state(&mut self) {
+         if self.camera_state == CameraState::PoweringOn
+             && self.current_time

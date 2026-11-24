@@ -1,0 +1,13 @@
+diff --git a/.goreleaser.yml b/.goreleaser.yml
+index 6db8b6c..6ef5fa7 100644
+--- a/.goreleaser.yml
++++ b/.goreleaser.yml
+@@ -34,6 +34,8 @@ nfpms:
+     file_name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Arch }}"
+     formats:
+       - deb
++    deb:
++      compression: xz
+     bindir: /usr/bin
+     contents:
+       - src: _release/managementd-avahi.service

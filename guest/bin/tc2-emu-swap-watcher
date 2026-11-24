@@ -1,0 +1,45 @@
+#!/bin/bash
+# Emulator only, while we audit that nothing on a TC2 uses swap (it's on an SD card): reports
+# a "swapUsed" event when the kernel has swapped pages out, with what's using the swap.
+# Runs from the share (see guest-setup.sh). Not in the real image.
+#
+# Watches pswpout in /proc/vmstat, the count of pages written to swap. Swap in use alone
+# would keep reporting long after the memory pressure has gone, as pages stay in swap
+# until they're needed again.
+set -u
+
+INTERVAL=${SWAP_WATCH_INTERVAL:-5}
+# At least this long between reports.
+MIN_BETWEEN=${SWAP_WATCH_MIN_BETWEEN:-60}
+
+pswpout() { awk '$1 == "pswpout" { print $2 }' /proc/vmstat; }
+meminfo() { awk -v k="$1:" '$1 == k { print $2 }' /proc/meminfo; }
+
+last=$(pswpout)
+last_report=0
+while sleep "$INTERVAL"; do
+    now_out=$(pswpout)
+    pages=$((now_out - last))
+    ((pages > 0)) || continue
+    now=$(date +%s)
+    # Keep `last` where it is until reported, so pages swapped out in the quiet period count.
+    if ((now - last_report < MIN_BETWEEN)); then
+        continue
+    fi
+    last=$now_out
+    last_report=$now
+
+    swap_used=$(($(meminfo SwapTotal) - $(meminfo SwapFree)))
+    # report-event passes the JSON to dbus-send unquoted, so it can't contain spaces.
+    top=$(
+        for s in /proc/[0-9]*/status; do
+            awk '$1 == "Name:" { n = $2 } $1 == "VmSwap:" { print $2, n }' "$s" 2>/dev/null
+        done | sort -rn | head -5 | awk 'BEGIN { s = "" } $1 > 0 {
+            gsub(/[^A-Za-z0-9._-]/, "_", $2)
+            s = s (s == "" ? "" : ",") "{\"name\":\"" $2 "\",\"swapKb\":" $1 "}"
+        } END { print s }'
+    )
+    /usr/bin/report-event swapUsed \
+        "{\"severity\":\"warning\",\"pagesSwappedOut\":$pages,\"swapUsedKb\":$swap_used,\"memAvailableKb\":$(meminfo MemAvailable),\"topSwapUsers\":[$top]}" \
+        >/dev/null 2>&1 || true
+done

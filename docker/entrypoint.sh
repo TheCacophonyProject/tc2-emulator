@@ -4,8 +4,10 @@
 #                  reachable in the guest as http://192.168.1.1:1080
 #   TC2_GROUP      group to register the device in (default "new")
 #   TC2_NAME       device name to register as (default: random)
-#   TC2_AGENT=real run the real tc2-agent against an emulated RP2040, rather than
-#                  the tc2-emu-agent stand-in
+#   TC2_AGENT=stand-in  run the tc2-emu-agent stand-in rather than the real
+#                  tc2-agent against the emulated RP2040 (default: real)
+#   TC2_RP2040=scripted  with the real tc2-agent, emulate the RP2040 with the
+#                  scripted tc2-emu-rp2040 rather than tc2-firmware (tc2-firmware-emu)
 #   TC2_PERSIST=1  keep guest disk changes between runs (default: fresh each run)
 #   TC2_SMP        guest CPU count (default 4, as on a Pi Zero 2 W)
 #   TC2_CONFIG_SYNC_DELAY  how long cacophony-config-sync waits after the config
@@ -35,7 +37,11 @@ fi
 APPEND="root=PARTUUID=93147b3c-02 rootfstype=ext4 rootwait fsck.repair=yes console=ttyAMA0 net.ifnames=0 spidev.bufsiz=65536 apparmor=0"
 [[ -n ${TC2_GROUP:-} ]] && APPEND+=" tc2-emu.group=$TC2_GROUP"
 [[ -n ${TC2_NAME:-} ]] && APPEND+=" tc2-emu.name=$TC2_NAME"
-[[ ${TC2_AGENT:-} == real ]] && APPEND+=" tc2-emu.agent=real"
+case ${TC2_AGENT:-real} in
+    real) APPEND+=" tc2-emu.agent=real" ;;
+    stand-in) ;;
+    *) echo "TC2_AGENT must be real or stand-in, not ${TC2_AGENT}" >&2; exit 1 ;;
+esac
 [[ -n ${TC2_CONFIG_SYNC_DELAY:-} ]] && APPEND+=" tc2-emu.config-sync-delay=$TC2_CONFIG_SYNC_DELAY"
 [[ ${TC2_AUTOLOGIN:-} == 0 ]] && APPEND+=" tc2-emu.autologin=0"
 
@@ -54,9 +60,19 @@ socat TCP-LISTEN:1080,bind=127.0.0.1,fork,reuseaddr "TCP:${TC2_API:-host.docker.
 # Device models for the HAT. The guest's tc2-emu-* stubs reach them over a
 # virtio-serial port, and load from $EMU/guest, shared into the guest over 9p.
 [[ -x $EMU/host/tc2-emu-hw ]] || { echo "missing $EMU/host/tc2-emu-hw - run 'make stubs'" >&2; exit 1; }
-"$EMU/host/tc2-emu-hw" --socket "$STATE/hw.sock" --listen 0.0.0.0:9000 &
-# Stand-in RP2040 for the real tc2-agent.
-[[ ${TC2_AGENT:-} == real ]] && "$EMU/host/tc2-emu-rp2040" --socket "$STATE/rp2040.sock" &
+"$EMU/host/tc2-emu-hw" --socket "$STATE/hw.sock" --rp2040-socket "$STATE/hw-rp2040.sock" \
+    --listen 0.0.0.0:9000 &
+# The RP2040 for the real tc2-agent: tc2-firmware on its mocked HAL, on the same I2C
+# bus as the guest (tc2-emu-hw's RP2040 socket), its Lepton holding a fixture's frame.
+if [[ ${TC2_AGENT:-real} == real ]]; then
+    if [[ ${TC2_RP2040:-} == scripted ]]; then
+        "$EMU/host/tc2-emu-rp2040" --socket "$STATE/rp2040.sock" &
+    else
+        [[ -x $EMU/host/tc2-firmware-emu ]] || { echo "missing $EMU/host/tc2-firmware-emu - run 'make stubs'" >&2; exit 1; }
+        "$EMU/host/tc2-firmware-emu" --hw-socket "$STATE/hw-rp2040.sock" \
+            --link "$STATE/rp2040.sock" --cptv "$EMU/guest/fixtures/cat-trigger.cptv" &
+    fi
+fi
 
 # 512M matches the Pi Zero 2 W, the lowest-spec hardware variant.
 exec qemu-system-aarch64 \

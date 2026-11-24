@@ -4,6 +4,8 @@
 # the tc2-emu-agent stand-in.
 dir=$(dirname "$0")
 if grep -qw 'tc2-emu.agent=real' /proc/cmdline; then
+    # The timezone lookup tc2-agent runs, which the real image has in /usr/bin.
+    export TC2_TZLOOKUP="$dir/tc2-tzlookup"
     exec "$dir/tc2-agent" --rp2040-link /dev/virtio-ports/org.cacophony.tc2-emu.rp2040 "$@"
 fi
 exec "$dir/tc2-emu-agent" "$@"

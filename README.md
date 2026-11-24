@@ -9,8 +9,9 @@ is not emulated.
 
 ## Architecture
 
-Running (`make up`). Dashed parts are the real tc2-agent (`TC2_AGENT=real`);
-otherwise the `tc2-emu-agent` stand-in serves tc2-agent's D-Bus interface.
+Running (`make up`). Dashed parts are the real tc2-agent and the emulated RP2040,
+the default; with `TC2_AGENT=stand-in`, the `tc2-emu-agent` stand-in serves
+tc2-agent's D-Bus interface instead.
 
 ```mermaid
 flowchart TB
@@ -107,7 +108,7 @@ make down
 Use a different source image with `make image SRC_IMG=path/to.img`.
 
 - SSH: `localhost:2222`, management-interface: `http://localhost:8080`,
-  hardware control API: `http://localhost:9000`
+  hardware control API: `http://localhost:9000` (the page there lists its routes)
 - Each run starts from a clean copy of `base.qcow2`. `TC2_PERSIST=1` keeps changes.
 - `make image` registers an arm64 binfmt handler on the host kernel if missing
   (lasts until reboot). Arm64 hosts don't need one.
@@ -156,14 +157,51 @@ See `scripts/guest-setup.sh`. In short:
   service instead of ifupdown. A TC2 uses neither (NetworkManager does the wifi and
   modem) and they cost ~7s of CPU at boot; the real image should drop them too.
 - `device-register` registers with the test API instead of production (see below).
-- `salt-minion`, `salt-updater`, swap, `rpi-eeprom-update` and `sshswitch` are
+- `salt-minion`, `salt-updater`, `rpi-eeprom-update` and `sshswitch` are
   disabled; add `tc2-emu.enable=<service>` to the kernel command line to enable one.
+- Swap is on, as on a TC2 (1GiB `/var/swap` from `dphys-swapfile`, swappiness 10). While
+  we audit that nothing swaps on an SD card, `tc2-emu-swap-watcher` (emulator only) reports a
+  `swapUsed` event, with the top swap users, when the kernel swaps pages out.
 - The first-boot rootfs expansion in `rc.local` is skipped.
 - Serial console autologin as `pi`, plus a test SSH key.
 - `tc2-emu-journal` streams the journal to the container over a virtio-serial
   port, into `/state/journal.log` (the `tc2-state` volume). It's reset when the
   container starts and covers each guest boot from the start, so it works without
   SSH and keeps logs from a guest that hung or rebooted.
+
+## An image for a real device
+
+`make real-image` writes `images/tc2-real.img`, to put on an SD card for a real TC2 and
+compare it with the emulator. It starts from the same SD card image and gets the same
+software and changes (`scripts/guest-setup.sh` with `TC2_TARGET=device`): the pinned
+package versions, the saltops highstate, the purges, the logrotate and `managementd`
+socket-activation changes, and the same services disabled. It keeps the Pi's own kernel,
+boot partition and first-boot rootfs expansion, and leaves out everything for QEMU. The
+builds with `guest/patches` applied, all of them (including `tc2-agent` with the emulated
+RP2040 link, which does nothing unless `--rp2040-link` is given), are installed over the
+packages' binaries in `/usr/bin`.
+
+1. `cp real-device.conf.example real-device.conf` and fill it in: the wifi network, and a
+   **test** API the device can reach over it, such as this Mac's `cacophony-web` at
+   `http://<this Mac's LAN address>:1080`. The build refuses a production URL. With no API
+   the device doesn't register, so nothing contacts any API, but `managementd`, the
+   uploader and config sync don't run either. The wifi password goes into the image.
+2. `make real-image` (about 5 minutes). It also makes `images/real_ed25519`, whose public
+   half is the only key the image adds for `pi`.
+3. Write it to the card (16GB or more; it expands to fill the card on first boot, which
+   reboots once). On macOS, with the card's disk number from `diskutil list`:
+   `diskutil unmountDisk /dev/diskN && sudo dd if=images/tc2-real.img of=/dev/rdiskN bs=4m`
+   (press ctrl-t for progress), or Raspberry Pi Imager's "Use custom".
+4. Boot it. Once it has joined the wifi:
+   `ssh -i images/real_ed25519 pi@tc2-image.local` (or its address). When it registers it is
+   renamed; its new name is then `<device name>.local` too.
+
+Salt's minion and updater are off, as in the emulator, so nothing updates the device or
+contacts the production salt master (its minion is masterless, as the emulator's). To turn
+a disabled service back on, add `tc2-emu.enable=<service>` to `cmdline.txt` on the card's
+boot partition, which a Mac can edit. `modemd` and `rpi-net-manager` are on, as on a real
+TC2; `modemd` restarts every 5s after registering if there's no modem. Only the CPU and
+kernel differ from the emulator, and the hardware; the image hasn't been tried on one yet.
 
 ## Networking and the test API
 
@@ -209,19 +247,27 @@ The Rust workspace in `crates/` stands in for the TC2 HAT:
   and `tc2-hat-temp` run unchanged on top. Its launcher then runs tc2-hat-i2c's
   startup EEPROM check (`tc2-hat-controller i2c eeprom`), which writes the
   `/etc/cacophony/eeprom-data.json` that `tc2-hat-attiny` reads battery settings from.
-- `tc2-emu-agent` replaces `tc2-agent` until it can talk to an emulated RP2040. It
-  serves the `org.cacophony.TC2Agent` methods managementd uses, with tc2-agent's
+- The guest runs the real `tc2-agent` (built with `guest/patches/tc2-agent`),
+  talking to an emulated RP2040 over a second virtio-serial port
+  (`--rp2040-link`). The RP2040 is `tc2-firmware-emu`: the tc2-firmware release
+  that tc2-agent ships, built on the firmware's mocked HAL with
+  `guest/patches/tc2-firmware` (`scripts/build-tc2-firmware-emu.sh`). It runs in
+  the container, is on the same I2C bus as the Pi (through `tc2-emu-hw`), and its
+  Lepton holds the first frame of `fixtures/cat-trigger.cptv`. It records to its
+  emulated flash and offloads to tc2-agent as on a device, and in high power mode
+  streams frames for thermal-recorder. Outside its recording window it has the Pi
+  power off, which stops the emulator for now; the e2e tests set an always-on
+  window. `TC2_RP2040=scripted` runs `tc2-emu-rp2040`, a scripted stand-in that
+  only makes the startup handshake and streams flat frames, instead.
+- With `TC2_AGENT=stand-in`, `tc2-emu-agent` replaces `tc2-agent`. It serves the
+  `org.cacophony.TC2Agent` methods managementd uses, with tc2-agent's
   replies and status codes. A test recording goes through tc2-agent's status
   sequence, then saves `fixtures/cat-trigger.cptv` to `/var/spool/cptv` for
   thermal-uploader, with its header rewritten to the current time, this device's
   name and id, and the `test: true` motion config tc2-firmware writes for a
-  user-requested recording. Audio recordings and preview frames aren't emulated yet.
-- With `TC2_AGENT=real`, the guest runs the real `tc2-agent` instead (built with
-  `guest/patches/tc2-agent`), talking to an emulated RP2040 over a
-  second virtio-serial port (`--rp2040-link`). For now that's `tc2-emu-rp2040`, a
-  scripted stand-in in the container: it makes the startup handshake (firmware 40),
-  then streams flat frames. It can't make recordings yet; tc2-firmware's simulation
-  will take its place.
+  user-requested recording. Audio recordings and preview frames aren't emulated,
+  and `new_device_setup`'s Sidekick-style test recording fails with it, as it stops
+  streaming when the config changes.
 
 Guest binaries are cross-compiled for `aarch64-unknown-linux-musl` and shared into
 the guest at `/opt/tc2-emu` over 9p, so changing a stub needs `make stubs` and a
@@ -291,6 +337,14 @@ and audio recording mode from the web portal to the device and back. It needs th
 `go-config` patch above: without it, the sync still uses the old device's
 credentials after reregistering. The tests share the one device, so `make e2e`
 runs them in turn, `new_device_setup` first (`E2E_TESTS` in the Makefile).
+
+`classify` checks the on-device classifier: it loads its models (and serves them on
+127.0.0.1:8123) only while comms is enabled, which sets `[thermal-motion]
+run-classifier`, then classifies the test recordings salt installs in
+`/var/spool/cptv/test-recordings` (about a minute each on the emulated Pi). It runs
+`pi_classify` in the guest over SSH (`TC2_E2E_SSH`, `TC2_E2E_SSH_KEY`, set by `make e2e`).
+The image has `/label_paths.json` baked in: classifier-pipeline otherwise downloads it
+from GitHub the first time it loads a model, and the emulated device has no internet.
 
 The tests are `#[ignore]`d so `cargo test` stays offline; `make e2e` starts a fresh
 emulator and runs them. Set `TC2_E2E_API` / `TC2_E2E_MANAGEMENTD` to point elsewhere.

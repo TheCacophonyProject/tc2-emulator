@@ -1,0 +1,70 @@
+#!/usr/bin/python3
+"""Emulator only. Sets the guest's clock from the emulated RTC's time with millisecond
+precision, after tc2-hat-rtc has set it from the RTC's whole seconds. Without this the
+guest is up to a second behind the host (and so the API), which a real device wouldn't
+be once NTP had synced, and which made config sync's "newer wins" comparison lose a
+device change that followed a portal change by less than the skew. Runs from the share
+(see guest-setup.sh). Not in the real image.
+
+Takes the time stamps in this process, since starting curl or date on the emulated Pi
+takes hundreds of milliseconds, and uses the sample with the shortest round trip, as
+NTP does.
+
+`tc2-emu-timesync --check` only reports how far off the clock is.
+"""
+import os
+import subprocess
+import sys
+import time
+import urllib.request
+
+HOST = os.environ.get("TC2_EMU_HW", "192.168.1.1:9000")
+SAMPLES = 7
+
+
+def sample():
+    """Returns (round trip, host's time minus ours at the middle of the round trip)."""
+    before = time.time()
+    with urllib.request.urlopen(f"http://{HOST}/time", timeout=5) as response:
+        host = float(response.read().decode())
+    after = time.time()
+    rtt = after - before
+    return rtt, host + rtt / 2 - after
+
+
+def best_offset():
+    samples = []
+    for _ in range(SAMPLES):
+        try:
+            samples.append(sample())
+        except OSError as e:
+            print(f"couldn't get the time from {HOST}: {e}", file=sys.stderr)
+        time.sleep(0.05)
+    if not samples:
+        sys.exit(1)
+    return min(samples)
+
+
+def wait_for_tc2_hat_rtc():
+    # tc2-hat-rtc sets the clock once as it starts and logs this when it has; setting
+    # ours before that would be undone by it.
+    for _ in range(120):
+        out = subprocess.run(
+            ["journalctl", "-b", "-q", "-u", "tc2-hat-rtc", "--no-pager"],
+            capture_output=True,
+            text=True,
+        ).stdout
+        if "System clock moved by" in out:
+            return
+        time.sleep(0.5)
+
+
+if "--check" in sys.argv:
+    rtt, offset = best_offset()
+    print(f"host minus guest: {offset * 1000:.0f}ms (round trip {rtt * 1000:.0f}ms)")
+    sys.exit(0)
+
+wait_for_tc2_hat_rtc()
+rtt, offset = best_offset()
+time.clock_settime(time.CLOCK_REALTIME, time.time() + offset)
+print(f"Moved the clock by {offset * 1000:.0f}ms (round trip {rtt * 1000:.0f}ms)")

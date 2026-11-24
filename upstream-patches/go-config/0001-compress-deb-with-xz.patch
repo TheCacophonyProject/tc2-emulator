@@ -1,0 +1,13 @@
+diff --git a/.goreleaser.yml b/.goreleaser.yml
+index a3babed..67dcf04 100644
+--- a/.goreleaser.yml
++++ b/.goreleaser.yml
+@@ -29,6 +29,8 @@ nfpms:
+     file_name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Arch }}"
+     formats:
+       - deb
++    deb:
++      compression: xz
+     bindir: /usr/bin
+     contents:
+       - src: _release/cacophony-config-sync.service

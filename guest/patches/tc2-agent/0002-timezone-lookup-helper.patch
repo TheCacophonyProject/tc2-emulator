@@ -1,0 +1,145 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index 8d914db..0a703eb 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -30,7 +30,6 @@ louvre = "0.2.1"
+ rustbus = "0.19.3"
+ sha256 = "1.5.0"
+ sysinfo = "0.35.2"
+-tzf-rs = { version = "1.1.3", features = ["bundled"], default-features = false }
+ localzone = { version = "0.3.1", features = ["auto_validation"] }
+ # For the tc2-rp2040-logs binary, which decodes the rp2040's defmt log frames.
+ defmt-decoder = "1.1.0"
+diff --git a/src/device_config.rs b/src/device_config.rs
+index f49d4ec..96880ca 100644
+--- a/src/device_config.rs
++++ b/src/device_config.rs
+@@ -17,15 +17,91 @@ use std::fmt::{Debug, Formatter};
+ use std::io::{Cursor, Write};
+ use std::ops::Add;
+ use std::path::Path;
++use std::process::Command;
+ use std::str::FromStr;
+-use std::sync::LazyLock;
+ use std::sync::mpsc::{Receiver, Sender, TryRecvError};
+ use std::{fs, process};
+ use sun_times::sun_times;
+ use toml::Value;
+ use toml::value::Offset;
+ 
+-pub static TZ_FINDER: LazyLock<tzf_rs::DefaultFinder> = LazyLock::new(tzf_rs::DefaultFinder::new);
++/// The helper that finds the timezone at a location, which is installed separately from tc2-agent
++/// since its data changes rarely and is most of the size of this binary. `TC2_TZLOOKUP` overrides
++/// where it is.
++const TZLOOKUP: &str = "/usr/bin/tc2-tzlookup";
++
++/// Where the last timezone lookup is remembered, so the lookup can be skipped when the location
++/// hasn't changed. This is a cache only: it's safe to delete.
++const TIMEZONE_CACHE: &str = "/var/cache/tc2-agent/timezone";
++
++/// The name of the timezone at a location.
++///
++/// Finding it means loading the world's timezone polygons, which takes about 100MB of memory and
++/// several seconds of CPU on the camera, and the answer only changes if the camera is moved. So
++/// it's done by `tc2-tzlookup`, a process that exits straight afterwards and so gives all of that
++/// memory back, rather than by holding the polygons in this process, where the memory sits idle
++/// outside the recording window, gets swapped out to the SD card, and (on a slow card) can stall
++/// the whole system. The last answer is also cached, keyed by location and the helper's version
++/// (so an update to its timezone data refreshes it). If the helper fails, a cached answer for
++/// another location or version is better than none.
++pub fn timezone_name(lng: f64, lat: f64) -> Result<String, String> {
++    let helper = std::env::var("TC2_TZLOOKUP").unwrap_or_else(|_| TZLOOKUP.to_string());
++    let cached = fs::read_to_string(TIMEZONE_CACHE).ok().and_then(|cached| {
++        let (key, name) = cached.split_once('\n')?;
++        let name = name.trim();
++        (!name.is_empty()).then(|| (key.to_string(), name.to_string()))
++    });
++    let version = Command::new(&helper)
++        .arg("--version")
++        .output()
++        .ok()
++        .filter(|output| output.status.success())
++        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string());
++    let key = format!("{} {lng:.6} {lat:.6}", version.as_deref().unwrap_or("unknown"));
++    if let Some((cached_key, name)) = &cached {
++        if version.is_some() && *cached_key == key {
++            info!("Using the cached timezone '{name}' for the location");
++            return Ok(name.clone());
++        }
++    }
++    let started = std::time::Instant::now();
++    let looked_up = Command::new(&helper)
++        .arg(format!("{lat}"))
++        .arg(format!("{lng}"))
++        .output()
++        .map_err(|e| format!("Couldn't run {helper}: {e}"))
++        .and_then(|output| {
++            let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
++            if output.status.success() && !name.is_empty() {
++                Ok(name)
++            } else {
++                Err(format!(
++                    "{helper} failed ({}): {}",
++                    output.status,
++                    String::from_utf8_lossy(&output.stderr).trim()
++                ))
++            }
++        });
++    match looked_up {
++        Ok(name) => {
++            info!("Looked up timezone '{name}' for the location in {:?}", started.elapsed());
++            if let Some(dir) = Path::new(TIMEZONE_CACHE).parent() {
++                let _ = fs::create_dir_all(dir);
++            }
++            if let Err(e) = fs::write(TIMEZONE_CACHE, format!("{key}\n{name}\n")) {
++                warn!("Couldn't cache the timezone lookup: {e}");
++            }
++            Ok(name)
++        }
++        Err(e) => match cached {
++            Some((_, name)) => {
++                warn!("{e}; using the cached timezone '{name}', which may be for another location");
++                Ok(name)
++            }
++            None => Err(e),
++        },
++    }
++}
+ 
+ fn default_constant_recorder() -> bool {
+     false
+@@ -949,8 +1025,8 @@ pub fn watch_local_config_file_changes(
+                             warn!("Config updated");
+ 
+                             let (lat, lng) = current_config.lat_lng();
+-                            if let Err(e) =
+-                                set_system_timezone(TZ_FINDER.get_tz_name(lng as f64, lat as f64))
++                            if let Err(e) = timezone_name(lng as f64, lat as f64)
++                                .and_then(|timezone| set_system_timezone(&timezone))
+                             {
+                                 error!("{e}");
+                                 process::exit(1);
+diff --git a/src/main.rs b/src/main.rs
+index b49baea..dd99351 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -38,7 +38,7 @@ use crate::camera_transfer_state::enter_camera_transfer_loop;
+ use crate::dbus_attiny_i2c::exit_if_attiny_version_is_not_as_expected;
+ use crate::dbus_managementd::setup_dbus_managementd_recording_service;
+ use crate::device_config::watch_local_config_file_changes;
+-use crate::device_config::{DeviceConfig, TZ_FINDER};
++use crate::device_config::{DeviceConfig, timezone_name};
+ use crate::frame_socket_server::spawn_frame_socket_server_thread;
+ use crate::mode_config::ModeConfig;
+ use crate::program_rp2040::check_if_rp2040_needs_programming;
+@@ -216,7 +216,9 @@ fn main() {
+             Ok::<(), Error>(())
+         })
+         .unwrap();
+-    if let Err(e) = set_system_timezone(TZ_FINDER.get_tz_name(lng as f64, lat as f64)) {
++    if let Err(e) =
++        timezone_name(lng as f64, lat as f64).and_then(|timezone| set_system_timezone(&timezone))
++    {
+         error!("{e}");
+         process::exit(1);
+     }

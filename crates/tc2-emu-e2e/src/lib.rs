@@ -1,6 +1,6 @@
 //! Helpers for end-to-end tests: a client for the Cacophony API acting as a user
 //! (mirroring cacophony-web's e2e-tests helpers), and one for the emulated
-//! device's managementd, acting as Sidekick or the web UI.
+//! device's managementd, acting as Sidekick or the web UI, and a shell in the guest.
 //!
 //! Projects are called groups by the API and managementd; that name is kept only
 //! in their paths and JSON fields.
@@ -401,6 +401,26 @@ impl Managementd {
         Ok(())
     }
 
+    /// Records 24 hours a day, as Sidekick's camera settings write it. With the real
+    /// tc2-firmware, a device outside its recording window in high power mode tells
+    /// the ATtiny the Pi may sleep, and the Pi powers off; tests that need the Pi to
+    /// stay up set this.
+    pub fn set_always_on(&self) -> anyhow::Result<()> {
+        self.set_config("windows", json!({ "start-recording": "12:00", "stop-recording": "12:00" }))
+    }
+
+    /// A test recording as Sidekick and the web UI's camera page take one. managementd
+    /// picks who makes it by power mode: in high power mode, thermal-recorder records
+    /// the frames tc2-agent streams from the RP2040; in low and medium power mode, the
+    /// RP2040 records to its flash and offloads the file to the Pi.
+    pub fn take_snapshot_recording(&self) -> anyhow::Result<()> {
+        self.send(self.request(reqwest::Method::PUT, "/camera/snapshot-recording"))?;
+        Ok(())
+    }
+
+    /// A test recording from the web UI's low power thermal recording page: the
+    /// RP2040 records it to its flash and offloads the file to the Pi, whatever the
+    /// power mode.
     pub fn take_short_test_recording(&self) -> anyhow::Result<String> {
         send_json(self.request(reqwest::Method::PUT, "/thermal/short-test-recording"))
     }
@@ -454,4 +474,83 @@ impl TestDevice {
 /// An `updated` time for a settings section as the web portal makes it.
 pub fn now_iso() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
+
+/// A shell in the emulated guest over SSH, as `make ssh` gives. `TC2_E2E_SSH` is the
+/// `host:port` to reach the guest's SSH on (default `localhost:2222`) and
+/// `TC2_E2E_SSH_KEY` the test key (default `images/id_ed25519`).
+pub struct Guest;
+
+impl Guest {
+    /// Runs `command` as `pi` (which can `sudo`) and returns its stdout and stderr
+    /// together, whether or not it succeeded, and its exit code.
+    pub fn run_any(command: &str) -> anyhow::Result<(i32, String)> {
+        let target = std::env::var("TC2_E2E_SSH").unwrap_or_else(|_| "localhost:2222".into());
+        let key = std::env::var("TC2_E2E_SSH_KEY").unwrap_or_else(|_| "images/id_ed25519".into());
+        let (host, port) = target.rsplit_once(':').context("TC2_E2E_SSH isn't host:port")?;
+        let output = std::process::Command::new("ssh")
+            .args(["-i", &key, "-p", port])
+            .args(["-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null"])
+            .args(["-o", "LogLevel=ERROR", "-o", "ConnectTimeout=10"])
+            // One connection shared by every command, and by the test binaries that
+            // follow, since logging in to the emulated guest takes seconds. ssh starts
+            // the connection with the first command and it lingers for a minute after
+            // the last; a stale one (the guest rebooted) is replaced.
+            .args(["-o", "ControlMaster=auto", "-o", "ControlPersist=60"])
+            .args(["-o", "ControlPath=/tmp/tc2-e2e-ssh-%C"])
+            .arg(format!("pi@{host}"))
+            // So that one string with its own redirects and pipes runs as written.
+            .arg(format!("sh -c {}", shell_quote(&format!("{command} 2>&1"))))
+            .output()
+            .context("couldn't run ssh")?;
+        let code = output.status.code().unwrap_or(-1);
+        let text = String::from_utf8_lossy(&output.stdout).into_owned();
+        // ssh's own failure (the command's output is all on stdout), as opposed to the
+        // command's.
+        if code == 255 {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!("ssh to the guest failed: {stderr}{text}");
+        }
+        Ok((code, text))
+    }
+
+    /// Whether the guest runs the real tc2-agent against the emulated RP2040
+    /// (the default), rather than the tc2-emu-agent stand-in (`TC2_AGENT=stand-in`).
+    pub fn runs_real_agent() -> anyhow::Result<bool> {
+        Ok(Self::run("cat /proc/cmdline")?
+            .split_whitespace()
+            .any(|arg| arg == "tc2-emu.agent=real"))
+    }
+
+    /// The guest's clock, as seconds since the epoch, for `journal_since`.
+    pub fn now() -> anyhow::Result<i64> {
+        Ok(Self::run("date +%s")?.trim().parse()?)
+    }
+
+    /// `unit`'s journal messages since `since` (from [`Guest::now`]), one per line.
+    pub fn journal_since(unit: &str, since: i64) -> anyhow::Result<String> {
+        Self::run(&format!("journalctl -q -o cat -u {unit} --since @{since}"))
+    }
+
+    /// Starts the shared SSH connection in the background, retrying until the guest's
+    /// sshd is up, so that the slow first login overlaps with other waiting (the
+    /// device booting and registering) rather than adding to the first command.
+    pub fn connect_in_background() -> std::thread::JoinHandle<()> {
+        std::thread::spawn(|| {
+            let _ = wait_for("guest ssh", Duration::from_secs(300), || Self::run("true").map(Some));
+        })
+    }
+
+    /// Like `run_any`, but fails if the command does.
+    pub fn run(command: &str) -> anyhow::Result<String> {
+        let (code, output) = Self::run_any(command)?;
+        if code != 0 {
+            bail!("`{command}` in the guest exited with {code}: {output}");
+        }
+        Ok(output)
+    }
+}
+
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
 }

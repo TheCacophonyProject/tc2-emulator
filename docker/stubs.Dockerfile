@@ -14,4 +14,9 @@ RUN rustup component add rustfmt \
         && rm -rf /var/lib/apt/lists/*; \
     fi
 
+# For the e2e tests that run commands in the guest.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends openssh-client \
+    && rm -rf /var/lib/apt/lists/*
+
 ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=aarch64-linux-gnu-gcc

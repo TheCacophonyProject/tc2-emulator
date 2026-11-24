@@ -1,0 +1,10 @@
+[package]
+name = "tc2-tzlookup"
+description = "Finds the timezone name at a location, in a process of its own so that the memory it needs is returned when it exits"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# The versions tc2-agent used, whose data and API match.
+tzf-rs = { version = "=1.3.3", features = ["bundled"], default-features = false }

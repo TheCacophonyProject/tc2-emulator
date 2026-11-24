@@ -4,9 +4,16 @@
     <mapping directory="" vcs="Git" />
     <mapping directory="$PROJECT_DIR$" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/upstream/cacophony-web" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/upstream/classifier-pipeline" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/upstream/device-register" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/upstream/event-reporter" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/upstream/go-api" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/upstream/go-config" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/upstream/management-interface" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/upstream/saltops" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/upstream/sidekick" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/upstream/tc2-agent" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/upstream/tc2-firmware" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/upstream/tc2-hat-controller" vcs="Git" />
   </component>
 </project>

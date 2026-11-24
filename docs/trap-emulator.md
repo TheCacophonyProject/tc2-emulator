@@ -58,7 +58,7 @@ the host for tests.
  └───────────────────────────────────────────────────────────┘
 ```
 
-Opt-in, like `TC2_AGENT=real`: `TC2_TRAP=1` starts `tc2-emu-trap` and adds the
+Opt-in: `TC2_TRAP=1` starts `tc2-emu-trap` and adds the
 UART to QEMU. Without it the guest has no `/dev/serial0`, as now.
 
 ## Guest UART

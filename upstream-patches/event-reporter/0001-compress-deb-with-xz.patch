@@ -1,0 +1,13 @@
+diff --git a/.goreleaser.yml b/.goreleaser.yml
+index 9137b66..e80174d 100644
+--- a/.goreleaser.yml
++++ b/.goreleaser.yml
+@@ -30,6 +30,8 @@ nfpms:
+   file_name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Arch }}"
+   formats:
+     - deb
++  deb:
++    compression: xz
+   bindir: /usr/bin
+   contents:
+     - src: _release/event-reporter.service

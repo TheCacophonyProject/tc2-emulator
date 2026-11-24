@@ -1,0 +1,17 @@
+diff --git a/management-interface.go b/management-interface.go
+index d9d23c3..3ea5094 100644
+--- a/management-interface.go
++++ b/management-interface.go
+@@ -57,7 +57,11 @@ var log = logging.NewLogger("info")
+ //go:embed html
+ var htmlFiles embed.FS
+ 
+-//go:embed static
++// Only what the pages load is embedded, not the source maps and TypeScript sources (for browser
++// devtools) or the older Font Awesome font formats (all browsers that run the web interface load the
++// first of its sources, woff2). They are over 2.5MB, which is downloaded with each update.
++//
++//go:embed static/css/*.css static/js/*.js static/favicon.ico static/webfonts/*.woff2
+ var staticFiles embed.FS
+ 
+ // StaticFS returns the embedded static files, with static/ as the root.

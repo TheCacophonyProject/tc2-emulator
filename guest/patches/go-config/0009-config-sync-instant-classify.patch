@@ -1,0 +1,67 @@
+diff --git a/internal/cacophony-config-sync/main.go b/internal/cacophony-config-sync/main.go
+index f1e594c..7156901 100644
+--- a/internal/cacophony-config-sync/main.go
++++ b/internal/cacophony-config-sync/main.go
+@@ -207,6 +207,11 @@ var ConfigSections = Sections{
+ 				ConfigKey: "UseLowPowerMode",
+ 				MapKey:    "use-low-power-mode",
+ 			},
++			{
++				APIKey:    "instantClassify",
++				ConfigKey: "InstantClassify",
++				MapKey:    "instant-classify",
++			},
+ 			{
+ 				APIKey:    "updated",
+ 				ConfigKey: "Updated",
+diff --git a/internal/cacophony-config-sync/main_test.go b/internal/cacophony-config-sync/main_test.go
+index f4d0cd9..cc1e69e 100644
+--- a/internal/cacophony-config-sync/main_test.go
++++ b/internal/cacophony-config-sync/main_test.go
+@@ -436,7 +436,7 @@ updated = `+newer+`
+ 
+ 	assert.Equal(t, map[string]any{
+ 		// false is sent, so that the API can be changed to it.
+-		"thermalRecording": map[string]any{"useLowPowerMode": false, "updated": "2025-06-01T00:00:00.123Z"},
++		"thermalRecording": map[string]any{"useLowPowerMode": false, "instantClassify": false, "updated": "2025-06-01T00:00:00.123Z"},
+ 		"windows":          map[string]any{"startRecording": "09:00", "stopRecording": "17:00", "updated": "2025-06-01T00:00:00.123Z"},
+ 		// A zero seed is left out, as it is when the portal hasn't set one.
+ 		"audioRecording": map[string]any{"audioMode": "AudioAndThermal", "updated": "2025-06-01T00:00:00.123Z"},
+@@ -447,6 +447,37 @@ updated = `+newer+`
+ 	assert.Equal(t, parseTime(newer), windows.Updated, "the device's settings are left as they were")
+ }
+ 
++func TestSyncInstantClassifyFromAPI(t *testing.T) {
++	// Medium power mode is low power mode with instant classify.
++	s, _ := newSyncService(t, `
++[thermal-recorder]
++use-low-power-mode = false
++instant-classify = false
++updated = `+older+`
++`, map[string]any{
++		"thermalRecording": map[string]any{"useLowPowerMode": true, "instantClassify": true, "updated": newer},
++	})
++	require.NoError(t, s.sync())
++	thermal := unmarshalSection[config.ThermalRecorder](t, s, config.ThermalRecorderKey)
++	assert.True(t, thermal.UseLowPowerMode)
++	assert.True(t, thermal.InstantClassify)
++}
++
++func TestSyncInstantClassifyToAPI(t *testing.T) {
++	s, api := newSyncService(t, `
++[thermal-recorder]
++use-low-power-mode = true
++instant-classify = true
++updated = `+newer+`
++`, map[string]any{
++		"thermalRecording": map[string]any{"useLowPowerMode": false, "instantClassify": false, "updated": older},
++	})
++	require.NoError(t, s.sync())
++	assert.Equal(t, map[string]any{
++		"thermalRecording": map[string]any{"useLowPowerMode": true, "instantClassify": true, "updated": "2025-06-01T00:00:00.123Z"},
++	}, api.uploaded)
++}
++
+ func TestSyncSkipsSectionsNeverUpdated(t *testing.T) {
+ 	// Sections without an `updated` time have only defaults, so aren't sent.
+ 	s, api := newSyncService(t, `

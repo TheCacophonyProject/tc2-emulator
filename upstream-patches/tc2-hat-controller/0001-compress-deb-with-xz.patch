@@ -1,0 +1,13 @@
+diff --git a/.goreleaser.yml b/.goreleaser.yml
+index a079a5a..d6159af 100644
+--- a/.goreleaser.yml
++++ b/.goreleaser.yml
+@@ -27,6 +27,8 @@ nfpms:
+   file_name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Arch }}"
+   formats:
+     - deb
++  deb:
++    compression: xz
+   bindir: /usr/bin
+   contents:
+     - src: _release/raspberrypi-swd.cfg

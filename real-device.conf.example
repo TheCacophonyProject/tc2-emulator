@@ -1,0 +1,24 @@
+# Settings for `make real-image`, the image for a real TC2. Copy this to real-device.conf,
+# which isn't committed, and fill it in. It's read as shell, so quote values with spaces
+# or special characters: WIFI_PSK='my pass phrase'. The wifi password ends up in the
+# image, so keep the image to yourself.
+
+# The wifi network the device joins at boot. A TC2 has no ethernet, so this is how you
+# reach it (ssh pi@tc2-image.local until it registers and is renamed). It takes
+# priority over the bushnet network the image already knows. Leave WIFI_PSK empty for an
+# open network.
+WIFI_SSID=
+WIFI_PSK=
+# yes, if the network doesn't broadcast its name.
+WIFI_HIDDEN=no
+# Optional: a wifi regulatory domain, such as NZ, if the network needs one set.
+WIFI_COUNTRY=
+
+# A TEST Cacophony API for the device to register with, which it must be able to reach
+# over the wifi. For the cacophony-web server on this Mac, that's http://<this Mac's LAN
+# address>:1080. Never production: the build refuses *.cacophony.org.nz. Leave it empty
+# and the device doesn't register at all, so nothing contacts any API, but then what
+# needs a registered device (managementd, the uploader, config sync) doesn't run either.
+API_URL=
+# The group it registers into, as `make e2e`'s new_device_setup expects.
+GROUP=new
