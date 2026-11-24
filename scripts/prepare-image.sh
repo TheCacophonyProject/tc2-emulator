@@ -87,7 +87,7 @@ if [[ $TARGET == device ]]; then
     cp "$OUT/real_ed25519.pub" "$MNT/tmp/tc2-emu.pub"
     cp "${REAL_CONF:?REAL_CONF must be the path of real-device.conf}" "$MNT/tmp/tc2-real.conf"
     mkdir -p "$MNT/tmp/tc2-real-bins"
-    for bin in managementd tc2-agent tc2-hat-controller device-register cacophony-config-utils tc2-tzlookup event-reporter-tools; do
+    for bin in managementd tc2-agent tc2-rp2040-logs tc2-hat-controller device-register cacophony-config-utils tc2-tzlookup event-reporter-tools; do
         cp "$SCRIPTS/../build/guest/$bin" "$MNT/tmp/tc2-real-bins/$bin"
     done
 else

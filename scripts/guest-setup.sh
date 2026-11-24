@@ -280,7 +280,7 @@ else
 # The builds with guest/patches applied (see the Makefile's real-image target) go over
 # the packages' binaries. The units run them as they do the packages'; the emulator's
 # patches add flags (--rp2040-link, --sync-delay) that are off unless given.
-for bin in managementd tc2-agent tc2-hat-controller device-register cacophony-config-utils tc2-tzlookup event-reporter-tools; do
+for bin in managementd tc2-agent tc2-rp2040-logs tc2-hat-controller device-register cacophony-config-utils tc2-tzlookup event-reporter-tools; do
     install -m 755 "/tmp/tc2-real-bins/$bin" "/usr/bin/$bin"
 done
 fi

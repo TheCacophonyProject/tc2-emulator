@@ -7,7 +7,9 @@ set -euo pipefail
 # The release the image is updated to (see scripts/update-versions.sh).
 VERSION=$(awk '$1 == "tc2-agent" { print $2 }' /src/guest/versions/packages.txt)
 
-OUT=${1:?usage: build-tc2-agent.sh <output>}
+OUT=${1:?usage: build-tc2-agent.sh <tc2-agent output> [<tc2-rp2040-logs output>]}
+# The same build also makes tc2-rp2040-logs, which the real-device image installs.
+LOGS_OUT=${2:-}
 SRC=$(mktemp -d)
 trap 'rm -rf "$SRC"' EXIT
 
@@ -27,3 +29,6 @@ cd "$SRC"
 CC_aarch64_unknown_linux_musl=aarch64-linux-gnu-gcc \
     cargo build --release --target aarch64-unknown-linux-musl
 install -D target/aarch64-unknown-linux-musl/release/tc2-agent "$OUT"
+if [[ -n $LOGS_OUT ]]; then
+    install -D target/aarch64-unknown-linux-musl/release/tc2-rp2040-logs "$LOGS_OUT"
+fi
