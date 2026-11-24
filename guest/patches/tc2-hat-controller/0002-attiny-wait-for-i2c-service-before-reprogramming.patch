@@ -1,0 +1,129 @@
+diff --git a/i2crequest/i2crequest.go b/i2crequest/i2crequest.go
+index 6ea31f0..4731944 100644
+--- a/i2crequest/i2crequest.go
++++ b/i2crequest/i2crequest.go
+@@ -16,6 +16,10 @@ const (
+ 	DefaultTimeout = 3000
+ )
+ 
++// ErrServiceUnavailable is returned by Tx when the tc2-hat-i2c D-Bus service never
++// appeared, which says nothing about the device being asked for.
++var ErrServiceUnavailable = errors.New("dbus service not available within the timeout period")
++
+ type TxResponse struct {
+ 	Response []byte
+ 	Err      error
+@@ -82,7 +86,7 @@ func realTx(address byte, write []byte, readLen, timeout int) ([]byte, error) {
+ 		if dbusErr, ok := call.Err.(dbus.Error); ok && dbusErr.Name == "org.freedesktop.DBus.Error.ServiceUnknown" {
+ 			// Service is not available, wait and retry
+ 			if time.Since(startTime) > maxWaitTime {
+-				return nil, errors.New("dbus service not available within the timeout period")
++				return nil, ErrServiceUnavailable
+ 			}
+ 			time.Sleep(500 * time.Millisecond) // Wait 500ms before retrying
+ 		} else {
+diff --git a/internal/tc2-hat-attiny/attiny.go b/internal/tc2-hat-attiny/attiny.go
+index f150a3c..1d76b67 100644
+--- a/internal/tc2-hat-attiny/attiny.go
++++ b/internal/tc2-hat-attiny/attiny.go
+@@ -282,6 +282,13 @@ func updateATtinyFirmware() error {
+ 		if err := exec.Command("systemctl", "stop", tc2AgentService).Run(); err != nil {
+ 			return err
+ 		}
++		// Whatever happens below, don't leave tc2-agent stopped: nothing else starts it.
++		defer func() {
++			log.Println("Starting tc2-agent")
++			if err := exec.Command("systemctl", "start", tc2AgentService).Run(); err != nil {
++				log.Println("Failed to start tc2-agent:", err)
++			}
++		}()
+ 	}
+ 
+ 	log.Println("Pinging device.")
+@@ -301,21 +308,18 @@ func updateATtinyFirmware() error {
+ 		return err
+ 	}
+ 	time.Sleep(1 * time.Second)
+-
+-	if tc2Enabled {
+-		log.Println("Starting tc2-agent")
+-		if err := exec.Command("systemctl", "start", tc2AgentService).Run(); err != nil {
+-			return err
+-		}
+-	}
+ 	return nil
+ }
+ 
+ // connectToATtinyWithRetries tries to connect to an ATtiny device a certain number
+ // of times. If it fails to connect it logs an error message, attempts to update the
+ // ATtiny firmware, and will then repeat the process (retries) times.
++// i2cServiceWait is how long connectToATtinyWithRetries waits for the tc2-hat-i2c service.
++var i2cServiceWait = 5 * time.Minute
++
+ func connectToATtinyWithRetries(retries int) (*attiny, error) {
+ 	attempt := 0
++	var unavailableSince time.Time
+ 	for {
+ 		attiny, err := connectToATtiny()
+ 		if err == nil {
+@@ -323,6 +327,20 @@ func connectToATtinyWithRetries(retries int) (*attiny, error) {
+ 			attiny.writeAuxState()
+ 			return attiny, err
+ 		}
++		if errors.Is(err, i2crequest.ErrServiceUnavailable) {
++			// tc2-hat-i2c isn't up yet, as at boot on a slow device. That says nothing
++			// about the ATtiny, so don't stop tc2-agent and tc2-hat-comms to reprogram
++			// it; wait for the service, and let systemd restart this if it never comes.
++			if unavailableSince.IsZero() {
++				unavailableSince = time.Now()
++			}
++			if time.Since(unavailableSince) > i2cServiceWait {
++				return nil, err
++			}
++			log.Printf("Waiting for the I2C service: %v", err)
++			continue
++		}
++		unavailableSince = time.Time{}
+ 		if attempt < retries {
+ 			log.Printf("Failed to initialize attiny: %v, trying %d more times.\n", err, retries-attempt)
+ 		} else {
+diff --git a/internal/tc2-hat-attiny/connect_test.go b/internal/tc2-hat-attiny/connect_test.go
+new file mode 100644
+index 0000000..2732ca6
+--- /dev/null
++++ b/internal/tc2-hat-attiny/connect_test.go
+@@ -0,0 +1,34 @@
++package attiny
++
++import (
++	"errors"
++	"testing"
++	"time"
++
++	"github.com/TheCacophonyProject/tc2-hat-controller/i2crequest"
++)
++
++// A tc2-hat-i2c that hasn't started says nothing about the ATtiny: connecting must wait
++// for it, not fall through to stopping tc2-agent and reprogramming the ATtiny.
++func TestConnectWaitsForI2CServiceInsteadOfUpdatingFirmware(t *testing.T) {
++	origTx, origWait := i2crequest.TxImpl, i2cServiceWait
++	defer func() { i2crequest.TxImpl, i2cServiceWait = origTx, origWait }()
++	calls := 0
++	i2crequest.TxImpl = func(address byte, write []byte, readLen, timeout int) ([]byte, error) {
++		calls++
++		return nil, i2crequest.ErrServiceUnavailable
++	}
++	i2cServiceWait = 50 * time.Millisecond
++
++	start := time.Now()
++	_, err := connectToATtinyWithRetries(3)
++	if !errors.Is(err, i2crequest.ErrServiceUnavailable) {
++		t.Fatalf("expected the service unavailable error, got %v", err)
++	}
++	if calls < 2 {
++		t.Errorf("expected repeated attempts to connect, got %d", calls)
++	}
++	if time.Since(start) > 5*time.Second {
++		t.Errorf("took %v, expected about the wait of %v", time.Since(start), i2cServiceWait)
++	}
++}
