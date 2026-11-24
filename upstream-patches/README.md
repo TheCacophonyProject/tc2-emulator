@@ -79,3 +79,12 @@ Each is against the repo's main branch at the time.
   (30.4s against 31.2s on the emulator, where the agent then retried for under a second); it
   can't do anything useful sooner. tc2-agent is `DefaultDependencies=no` for an early start, and
   tc2-hat-i2c is not, so on real hardware this should be measured before releasing.
+- `guest/patches/classifier-pipeline/0002-fork-services-before-starting-threads.patch` (for upstream too; on top of
+  0001, applied by `scripts/guest-setup.sh`): `piclassify.main` forked the model server (and postprocess) after
+  starting the snapshot thread, which logs as it starts. A fork while another thread holds the stderr buffer's lock
+  leaves the child with that lock held and no owner, so the child blocks on its first log line forever: the model
+  server sat started but silent for minutes and nothing could classify (seen twice in full e2e runs). Caught with
+  gdb on a hung child (one thread, in `PyThread_acquire_lock` from a Python I/O write). Moves the service forks to
+  just after `processor.start()`, before the snapshot and watchdog threads. 40 of 40 comms off/on cycles then came
+  ready in 17-28s (unfixed: stuck at cycle 2). `watch_services` still restarts a dead service with threads running,
+  where the same risk applies. Against main at 4d7575df plus 0001, 2026-11-24.

@@ -136,6 +136,13 @@ tc2-agent's 2s dbus retries) and so shorten time-to-frames, not lengthen it; tha
   agent fails and restarts on a registered device's boot because attiny isn't up yet needs measuring with
   a reboot of a registered emulator.
 - **4:** `guest/patches/tc2-hat-controller/0002-attiny-wait-for-i2c-service-before-reprogramming.patch`
-  (built into the emulator's tc2-hat-controller). Unit-tested; the live check (take the I2C service away
-  while tc2-hat-attiny starts) wasn't achieved: something restarts tc2-hat-i2c whenever it's stopped, not
-  found yet.
+  (built into the emulator's tc2-hat-controller). Unit-tested, and checked live on 2026-11-24: with
+  `tc2-hat-i2c` made unstartable (a drop-in with `ExecStartPre=/bin/false`) and tc2-hat-attiny
+  restarted, it logged "Waiting for the I2C service" repeatedly and did not stop tc2-agent or
+  tc2-hat-comms or touch the firmware; both stayed active. Once i2c was restored it connected
+  ("Type: 0xCA", "Starting DBus service"). Not compared against the unpatched binary on the live guest;
+  the old behaviour (stopping tc2-agent, failed update, agent left stopped) is from the first failed
+  e2e run's journal and the code.
+- Why my earlier live attempt kept finding tc2-hat-i2c running: stopping it is permanent, but
+  restarting tc2-hat-attiny starts it again through the `Wants=tc2-hat-i2c.service` from the ordering
+  drop-in (an empty `Wants=` in a later drop-in did not remove it). Nothing else restarts it.

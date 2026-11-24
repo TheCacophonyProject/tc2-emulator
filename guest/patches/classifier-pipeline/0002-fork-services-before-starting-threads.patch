@@ -1,0 +1,39 @@
+diff --git a/src/piclassifier/piclassify.py b/src/piclassifier/piclassify.py
+index 3f63ffc..e2c4eb9 100644
+--- a/src/piclassifier/piclassify.py
++++ b/src/piclassifier/piclassify.py
+@@ -134,6 +134,19 @@ def main(thermal_config=None, parse_file=None, loaded_mtime=None):
+     )
+     processor.start()
+ 
++    # Fork the services now, before the snapshot and watchdog threads exist. A process forked
++    # while another thread holds a lock, such as the one on stderr while that thread logs, gets
++    # the lock held with nobody to release it, and blocks on it forever the first time it logs:
++    # the model server was seen started but silent, so nothing could classify.
++    # In postprocess mode only, could possibly start up the classifier only when a file for postprocessing
++    if (
++        thermal_config.base_motion.run_classifier
++        or thermal_config.base_motion.postprocess
++    ):
++        other_services.append(start_service(run_classifier))
++    if thermal_config.base_motion.postprocess:
++        other_services.append(start_service(run_postprocess))
++
+     # get a cloned window so we dont update it
+     if not thermal_config.recorder.use_low_power_mode:
+         snapshot_thread = Thread(
+@@ -152,14 +165,6 @@ def main(thermal_config=None, parse_file=None, loaded_mtime=None):
+         if os.path.exists(SOCKET_NAME):
+             raise
+     logging.info("running as thermal")
+-    # In postprocess mode only, could possibly start up the classifier only when a file for postprocessing
+-    if (
+-        thermal_config.base_motion.run_classifier
+-        or thermal_config.base_motion.postprocess
+-    ):
+-        other_services.append(start_service(run_classifier))
+-    if thermal_config.base_motion.postprocess:
+-        other_services.append(start_service(run_postprocess))
+ 
+     watchdog_stop = Event()
+     watchdog_thread = Thread(
