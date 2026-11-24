@@ -1,0 +1,296 @@
+### boot
+Startup finished in 8.003s (kernel) + 28.494s (userspace) = 36.497s 
+multi-user.target reached after 19.866s in userspace.
+
+### units (name | ActiveEnter s | state | cond | Restart/RestartSec | After | Before | Requires | Wants)
+avahi-daemon.service | 32.5 | active/running result=success | cond=yes | no 100ms | n_restarts=0
+  After: basic.target system.slice systemd-journald.socket dbus.socket sysinit.target avahi-daemon.socket
+  Before: multi-user.target shutdown.target
+  Requires: sysinit.target dbus.socket avahi-daemon.socket system.slice
+  Wants: 
+cacophony-config-sync.service | 34.1 | active/running result=success | cond=yes | always 30s | n_restarts=0
+  After: -.mount "opt-tc2\\x2demu.mount" systemd-journald.socket basic.target system.slice sysinit.target network.target
+  Before: multi-user.target shutdown.target
+  Requires: system.slice sysinit.target -.mount "opt-tc2\\x2demu.mount"
+  Wants: 
+cron.service | 20.1 | active/running result=success | cond=yes | on-failure 100ms | n_restarts=0
+  After: basic.target remote-fs.target systemd-journald.socket system.slice nss-user-lookup.target sysinit.target
+  Before: multi-user.target shutdown.target
+  Requires: sysinit.target system.slice
+  Wants: 
+dbus.service | 21.4 | active/running result=success | cond=yes | no 100ms | n_restarts=0
+  After: system.slice dbus.socket sysinit.target basic.target systemd-journald.socket
+  Before: wpa_supplicant.service shutdown.target multi-user.target NetworkManager.service user@1000.service user-runtime-dir@1000.service
+  Requires: dbus.socket sysinit.target system.slice
+  Wants: 
+device-register.service | 0.0 | inactive/dead result=success | cond=yes | no 100ms | n_restarts=0
+  After: system.slice multi-user.target sysinit.target systemd-journald.socket basic.target network.target "opt-tc2\\x2demu.mount" -.mount
+  Before: shutdown.target
+  Requires: sysinit.target "opt-tc2\\x2demu.mount" -.mount system.slice
+  Wants: 
+dnsmasq.service | 27.8 | active/running result=success | cond=yes | no 100ms | n_restarts=0
+  After: network.target sysinit.target systemd-journald.socket system.slice basic.target
+  Before: multi-user.target nss-lookup.target shutdown.target
+  Requires: system.slice sysinit.target network.target
+  Wants: nss-lookup.target
+dphys-swapfile.service | 23.4 | active/exited result=success | cond=yes | no 100ms | n_restarts=0
+  After: system.slice systemd-journald.socket basic.target sysinit.target
+  Before: multi-user.target shutdown.target
+  Requires: sysinit.target system.slice
+  Wants: 
+e2scrub_reap.service | 0.0 | inactive/dead result=success | cond=yes | no 100ms | n_restarts=0
+  After: tmp.mount -.mount basic.target system.slice sysinit.target systemd-tmpfiles-setup.service systemd-journald.socket
+  Before: multi-user.target shutdown.target
+  Requires: -.mount system.slice sysinit.target
+  Wants: tmp.mount
+energy-savings.service | 0.0 | inactive/dead result=success | cond=yes | no 100ms | n_restarts=0
+  After: systemd-journald.socket basic.target system.slice sysinit.target
+  Before: shutdown.target
+  Requires: sysinit.target system.slice
+  Wants: 
+event-reporter.service | 20.3 | active/running result=success | cond=yes | on-failure 5s | n_restarts=0
+  After: sysinit.target systemd-journald.socket basic.target system.slice
+  Before: shutdown.target tc2-emu-swap-watcher.service multi-user.target rpi-power-on.service network.target version-reporter.service
+  Requires: sysinit.target system.slice
+  Wants: 
+getty.target | 25.4 | active/active result= | cond=yes |   | n_restarts=
+  After: serial-getty@ttyAMA0.service getty-static.service getty@tty1.service
+  Before: multi-user.target shutdown.target
+  Requires: 
+  Wants: getty@tty1.service getty-static.service serial-getty@ttyAMA0.service
+hostapd.service | 0.0 | inactive/dead result=success | cond=no | no 100ms | n_restarts=0
+  After: 
+  Before: 
+  Requires: 
+  Wants: 
+managementd.socket | 34.8 | active/listening result=success | cond=yes |   | n_restarts=
+  After: sysinit.target system.slice
+  Before: sockets.target multi-user.target managementd.service shutdown.target
+  Requires: sysinit.target system.slice
+  Wants: 
+modemd.service | 0.0 | inactive/dead result=success | cond=no | on-failure 5s | n_restarts=0
+  After: sysinit.target basic.target system.slice systemd-journald.socket multi-user.target
+  Before: shutdown.target
+  Requires: sysinit.target system.slice
+  Wants: 
+NetworkManager.service | 24.4 | active/running result=success | cond=yes | on-failure 100ms | n_restarts=0
+  After: network-pre.target system.slice sysinit.target basic.target systemd-journald.socket dbus.service dbus.socket
+  Before: NetworkManager-wait-online.service multi-user.target network.target shutdown.target
+  Requires: sysinit.target dbus.socket system.slice
+  Wants: network.target
+paths.target | 10.5 | active/active result= | cond=yes |   | n_restarts=
+  After: systemd-ask-password-console.path systemd-ask-password-wall.path
+  Before: basic.target shutdown.target
+  Requires: 
+  Wants: 
+raspi-config.service | 23.6 | active/exited result=success | cond=yes | no 100ms | n_restarts=0
+  After: sysinit.target remote-fs.target system.slice basic.target systemd-udevd.service mountkernfs.service systemd-journald.socket
+  Before: shutdown.target graphical.target multi-user.target
+  Requires: sysinit.target system.slice
+  Wants: 
+rc-local.service | 25.1 | active/exited result=success | cond=yes | no 100ms | n_restarts=0
+  After: basic.target system.slice network.target network-online.target sysinit.target systemd-journald.socket
+  Before: getty@tty1.service multi-user.target serial-getty@ttyAMA0.service shutdown.target
+  Requires: sysinit.target system.slice
+  Wants: 
+remote-fs.target | 10.5 | active/active result= | cond=yes |   | n_restarts=
+  After: remote-fs-pre.target systemd-quotacheck.service
+  Before: systemd-user-sessions.service systemd-pcrphase.service cron.service raspi-config.service
+  Requires: 
+  Wants: 
+rpi-eeprom-update.service | 0.0 | inactive/dead result=success | cond=no | no 100ms | n_restarts=0
+  After: boot-firmware.mount sysinit.target system.slice systemd-journald.socket basic.target
+  Before: multi-user.target shutdown.target
+  Requires: sysinit.target system.slice
+  Wants: 
+rpi-net-manager.service | 0.0 | inactive/dead result=success | cond=no | on-failure 5s | n_restarts=0
+  After: system.slice multi-user.target sysinit.target basic.target systemd-journald.socket
+  Before: shutdown.target
+  Requires: sysinit.target system.slice
+  Wants: 
+rpi-power-on.service | 0.0 | inactive/dead result=success | cond=yes | no 100ms | n_restarts=0
+  After: sysinit.target basic.target systemd-journald.socket network.target multi-user.target event-reporter.service system.slice
+  Before: shutdown.target
+  Requires: sysinit.target system.slice
+  Wants: 
+salt-minion.service | 0.0 | inactive/dead result=success | cond=no | no 100ms | n_restarts=0
+  After: network.target systemd-journald.socket basic.target system.slice sysinit.target salt-master.service
+  Before: multi-user.target shutdown.target
+  Requires: sysinit.target system.slice
+  Wants: 
+salt-updater.service | 0.0 | inactive/dead result=success | cond=no | on-failure 5s | n_restarts=0
+  After: basic.target multi-user.target systemd-journald.socket system.slice sysinit.target
+  Before: shutdown.target
+  Requires: sysinit.target system.slice
+  Wants: 
+service-watcher.service | 28.5 | active/running result=success | cond=yes | on-failure 5s | n_restarts=0
+  After: basic.target system.slice multi-user.target systemd-journald.socket sysinit.target
+  Before: shutdown.target
+  Requires: sysinit.target system.slice
+  Wants: 
+slices.target | 10.5 | active/active result= | cond=yes |   | n_restarts=
+  After: system.slice user.slice -.slice
+  Before: basic.target shutdown.target
+  Requires: 
+  Wants: -.slice system.slice
+sockets.target | 20.0 | active/active result= | cond=yes |   | n_restarts=
+  After: avahi-daemon.socket dbus.socket systemd-initctl.socket systemd-journald-dev-log.socket systemd-udevd-control.socket syslog.socket systemd-journald-audit.socket systemd-udevd-kernel.socket triggerhappy.socket managementd.socket systemd-journald.socket
+  Before: shutdown.target basic.target
+  Requires: 
+  Wants: systemd-udevd-control.socket systemd-initctl.socket systemd-journald-audit.socket dbus.socket avahi-daemon.socket systemd-udevd-kernel.socket triggerhappy.socket systemd-journald-dev-log.socket systemd-journald.socket
+ssh.service | 26.0 | active/running result=success | cond=yes | on-failure 100ms | n_restarts=0
+  After: -.mount network.target systemd-journald.socket system.slice basic.target sysinit.target auditd.service regenerate_ssh_host_keys.service
+  Before: multi-user.target shutdown.target
+  Requires: -.mount system.slice sysinit.target
+  Wants: 
+sshswitch.service | 0.0 | inactive/dead result=success | cond=no | no 100ms | n_restarts=0
+  After: sysinit.target system.slice boot-firmware.mount regenerate_ssh_host_keys.service systemd-journald.socket basic.target
+  Before: multi-user.target shutdown.target
+  Requires: sysinit.target system.slice
+  Wants: 
+systemd-ask-password-wall.path | 10.5 | active/waiting result=success | cond=yes |   | n_restarts=
+  After: -.mount
+  Before: emergency.service cryptsetup.target shutdown.target systemd-ask-password-wall.service paths.target
+  Requires: -.mount
+  Wants: 
+systemd-logind.service | 23.1 | active/running result=success | cond=yes | always 0 | n_restarts=0
+  After: systemd-journald.socket user.slice system.slice systemd-tmpfiles-setup.service dbus.socket sysinit.target tmp.mount modprobe@drm.service nss-user-lookup.target basic.target -.mount systemd-remount-fs.service
+  Before: multi-user.target shutdown.target session-5.scope
+  Requires: system.slice -.mount sysinit.target dbus.socket
+  Wants: dbus.socket tmp.mount user.slice modprobe@drm.service
+systemd-update-utmp-runlevel.service | 0.0 | inactive/dead result=success | cond=yes | no 100ms | n_restarts=0
+  After: rescue.target systemd-update-utmp.service graphical.target system.slice -.mount systemd-journald.socket multi-user.target
+  Before: shutdown.target
+  Requires: system.slice -.mount
+  Wants: 
+systemd-user-sessions.service | 25.2 | active/exited result=success | cond=yes | no 100ms | n_restarts=0
+  After: nss-user-lookup.target system.slice systemd-pcrphase.service home.mount systemd-journald.socket network.target basic.target sysinit.target remote-fs.target
+  Before: systemd-ask-password-wall.service user@1000.service shutdown.target multi-user.target session-5.scope serial-getty@ttyAMA0.service getty@tty1.service
+  Requires: sysinit.target system.slice
+  Wants: 
+tc2-agent.service | 43.8 | active/running result=success | cond=yes | always 5s | n_restarts=1
+  After: system.slice local-fs.target -.mount "opt-tc2\\x2demu.mount" systemd-journald.socket tc2-emu-gpio-defaults.service dbus.socket systemd-modules-load.service
+  Before: network-pre.target
+  Requires: dbus.socket "opt-tc2\\x2demu.mount" system.slice -.mount
+  Wants: network-pre.target
+tc2-emu-dns.service | 20.7 | active/running result=success | cond=yes | always 1s | n_restarts=0
+  After: basic.target systemd-tmpfiles-setup.service "opt-tc2\\x2demu.mount" -.mount systemd-journald.socket tmp.mount system.slice sysinit.target
+  Before: network-online.target shutdown.target multi-user.target nss-lookup.target
+  Requires: "opt-tc2\\x2demu.mount" sysinit.target system.slice -.mount
+  Wants: nss-lookup.target tmp.mount
+tc2-emu-gpio-defaults.service | 21.7 | active/exited result=success | cond=yes | no 100ms | n_restarts=0
+  After: system.slice systemd-journald.socket sysinit.target systemd-modules-load.service sys-kernel-debug.mount basic.target
+  Before: tc2-hat-attiny.service multi-user.target tc2-agent.service tc2-hat-i2c.service shutdown.target
+  Requires: sysinit.target system.slice
+  Wants: 
+tc2-emu-swap-watcher.service | 20.9 | active/running result=success | cond=yes | always 5s | n_restarts=0
+  After: systemd-journald.socket basic.target sysinit.target system.slice -.mount event-reporter.service "opt-tc2\\x2demu.mount"
+  Before: multi-user.target shutdown.target
+  Requires: system.slice -.mount sysinit.target "opt-tc2\\x2demu.mount"
+  Wants: 
+tc2-emu-uplink.service | 22.7 | active/exited result=success | cond=yes | no 100ms | n_restarts=0
+  After: systemd-journald.socket basic.target system.slice sysinit.target
+  Before: shutdown.target network-online.target multi-user.target
+  Requires: sysinit.target system.slice
+  Wants: 
+tc2-hat-attiny.service | 34.4 | active/running result=success | cond=yes | on-failure 5s | n_restarts=0
+  After: multi-user.target "opt-tc2\\x2demu.mount" tc2-hat-rtc.service -.mount systemd-journald.socket basic.target sysinit.target tc2-hat-i2c.service system.slice tc2-emu-gpio-defaults.service
+  Before: shutdown.target
+  Requires: sysinit.target system.slice "opt-tc2\\x2demu.mount" -.mount
+  Wants: 
+tc2-hat-comms.service | 35.4 | active/running result=success | cond=yes | always 5s | n_restarts=0
+  After: basic.target systemd-journald.socket sysinit.target system.slice multi-user.target
+  Before: shutdown.target
+  Requires: sysinit.target system.slice
+  Wants: 
+tc2-hat-i2c.service | 22.5 | active/running result=success | cond=yes | on-failure 5s | n_restarts=0
+  After: sysinit.target basic.target -.mount system.slice tc2-emu-gpio-defaults.service "opt-tc2\\x2demu.mount" systemd-journald.socket
+  Before: shutdown.target network.target tc2-hat-attiny.service multi-user.target
+  Requires: sysinit.target "opt-tc2\\x2demu.mount" system.slice -.mount
+  Wants: 
+tc2-hat-rtc.service | 21.1 | active/running result=success | cond=yes | on-failure 5s | n_restarts=0
+  After: systemd-journald.socket basic.target system.slice sysinit.target
+  Before: multi-user.target network.target tc2-hat-attiny.service shutdown.target
+  Requires: sysinit.target system.slice
+  Wants: 
+tc2-hat-temp.service | 28.8 | active/running result=success | cond=yes | on-failure 5s | n_restarts=0
+  After: sysinit.target basic.target systemd-journald.socket multi-user.target system.slice
+  Before: shutdown.target
+  Requires: sysinit.target system.slice
+  Wants: 
+tc2-rp2040-logs.service | 21.2 | active/running result=success | cond=yes | always 10s | n_restarts=0
+  After: systemd-journald.socket sysinit.target basic.target system.slice
+  Before: multi-user.target shutdown.target
+  Requires: sysinit.target system.slice
+  Wants: 
+thermal-recorder-py.service | 39.8 | active/running result=success | cond=yes | always 0 | n_restarts=1
+  After: systemd-modules-load.service local-fs.target systemd-journald.socket system.slice
+  Before: network-pre.target
+  Requires: system.slice
+  Wants: network-pre.target
+thermal-uploader.service | 34.6 | active/running result=success | cond=yes | always 5s | n_restarts=0
+  After: system.slice multi-user.target sysinit.target basic.target systemd-journald.socket network.target
+  Before: shutdown.target
+  Requires: sysinit.target system.slice
+  Wants: 
+timers.target | 20.0 | active/active result= | cond=yes |   | n_restarts=
+  After: e2scrub_all.timer fstrim.timer dpkg-db-backup.timer logrotate.timer systemd-tmpfiles-clean.timer
+  Before: 
+  Requires: 
+  Wants: dpkg-db-backup.timer systemd-tmpfiles-clean.timer e2scrub_all.timer fstrim.timer logrotate.timer
+tmp.mount | 0.0 | inactive/dead result=success | cond=no |   | n_restarts=
+  After: 
+  Before: systemd-hostnamed.service systemd-logind.service logrotate.service systemd-timedated.service basic.target tc2-emu-dns.service e2scrub_reap.service systemd-timesyncd.service
+  Requires: 
+  Wants: 
+triggerhappy.service | 0.0 | inactive/dead result=success | cond=no | no 100ms | n_restarts=0
+  After: local-fs.target systemd-journald.socket basic.target triggerhappy.socket system.slice sysinit.target
+  Before: multi-user.target shutdown.target
+  Requires: sysinit.target system.slice
+  Wants: 
+version-reporter.service | 0.0 | inactive/dead result=success | cond=yes | no 100ms | n_restarts=0
+  After: network.target event-reporter.service systemd-journald.socket system.slice basic.target sysinit.target multi-user.target
+  Before: shutdown.target
+  Requires: sysinit.target system.slice
+  Wants: 
+wpa_supplicant.service | 23.2 | active/running result=success | cond=yes | no 100ms | n_restarts=0
+  After: dbus.service basic.target dbus.socket -.mount sysinit.target systemd-journald.socket system.slice
+  Before: shutdown.target network.target multi-user.target
+  Requires: sysinit.target system.slice dbus.socket -.mount
+  Wants: network.target
+
+### systemd-analyze blame (top 30)
+8.396s device-register.service
+5.180s dev-vda2.device
+5.098s e2scrub_reap.service
+3.984s version-reporter.service
+3.441s systemd-udev-trigger.service
+3.297s dphys-swapfile.service
+3.178s dnsmasq.service
+3.165s raspi-config.service
+2.608s user@1000.service
+2.511s systemd-logind.service
+2.114s NetworkManager.service
+1.703s tc2-emu-uplink.service
+1.356s dbus.service
+1.353s energy-savings.service
+1.336s rpi-power-on.service
+1.326s systemd-update-utmp-runlevel.service
+1.288s systemd-tmpfiles-setup.service
+1.191s systemd-binfmt.service
+1.077s ssh.service
+1.030s systemd-journald.service
+ 979ms systemd-timedated.service
+ 921ms systemd-fsck@dev-disk-by\x2dpartuuid-93147b3c\x2d01.service
+ 900ms boot-firmware.mount
+ 859ms tc2-emu-gpio-defaults.service
+ 832ms systemd-fsck-root.service
+ 816ms dev-hugepages.mount
+ 788ms dev-mqueue.mount
+ 764ms sys-kernel-debug.mount
+ 740ms systemd-udevd.service
+ 739ms sys-kernel-tracing.mount
+
+### failures and restarts this boot (journal, by unit)
+39.752998 thermal-recorder-py.service Scheduled restart job, restart counter is at 1.
+43.728512 tc2-agent.service Scheduled restart job, restart counter is at 1.
