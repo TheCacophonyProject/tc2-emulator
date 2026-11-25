@@ -53,6 +53,12 @@ Each is against the repo's main branch at the time.
   device-register's "start services skipped at boot" starts them once registered. Against main at
   aa914df (tc2-agent) and 7e53ad0 (go-config), 2026-11-24. The emulator does the same with a drop-in
   in `scripts/guest-setup.sh`, since its image uses the packages' units.
+- `tc2-agent/0003-always-restart-rp2040-logs-after-programming.patch` (also `guest/patches/tc2-agent/0005`, which
+  the real-device image and the emulator build apply): the agent stops `tc2-rp2040-logs.service` while it programs or
+  erases the RP2040 and started it again only if it had found it running. On the first boot the agent is
+  restarted mid-programming, so the next run finds it stopped and never starts it, and rp2040 logs stay
+  off until the next boot. It now always starts it afterwards. Reproduced on a device by stopping the
+  service, creating `/etc/cacophony/program_rp2040` and restarting tc2-agent. Against v0.12.5, 2026-11-25.
 - `guest/patches/classifier-pipeline/0001-watch-config-before-trusting-the-loaded-copy.patch` (for upstream too; the
   emulator applies it to the installed PyPI package in `scripts/guest-setup.sh`): thermal-recorder-py loads
   `config.toml` at the start of `pi_classify()` but only starts watching it in `piclassify.main`, several seconds of

@@ -1,0 +1,41 @@
+diff --git a/src/program_rp2040.rs b/src/program_rp2040.rs
+--- a/src/program_rp2040.rs
++++ b/src/program_rp2040.rs
+@@ -12,9 +12,12 @@
+ 
+ /// Stops the RP2040 log capture for as long as this is alive, so that the
+ /// programmer has the SWD pins to itself.
+-struct SuspendedRp2040Logging {
+-    was_active: bool,
+-}
++///
++/// The capture is always started again afterwards, not only if it was running when this
++/// was made: a run that stopped it can be killed before it starts it again (tc2-agent is
++/// restarted on the first boot, for one), and the next run then finds it stopped, and
++/// would leave it that way until the next boot.
++struct SuspendedRp2040Logging;
+ 
+ impl SuspendedRp2040Logging {
+     fn suspend() -> Self {
+@@ -29,17 +32,15 @@
+                 error!("Failed to stop {RP2040_LOG_SERVICE}: {e}");
+             }
+         }
+-        Self { was_active }
++        Self
+     }
+ }
+ 
+ impl Drop for SuspendedRp2040Logging {
+     fn drop(&mut self) {
+-        if self.was_active {
+-            let _ = Command::new("systemctl")
+-                .args(["start", "--no-block", RP2040_LOG_SERVICE])
+-                .status();
+-        }
++        let _ = Command::new("systemctl")
++            .args(["start", "--no-block", RP2040_LOG_SERVICE])
++            .status();
+     }
+ }
+ 

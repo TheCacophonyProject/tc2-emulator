@@ -283,6 +283,23 @@ else
 for bin in managementd tc2-agent tc2-rp2040-logs tc2-hat-controller device-register cacophony-config-utils tc2-tzlookup event-reporter-tools; do
     install -m 755 "/tmp/tc2-real-bins/$bin" "/usr/bin/$bin"
 done
+# What the unit changes in upstream-patches do, until the packages' units have them (the
+# emulator does the same with the drop-ins above). The packages' own units stay as they are.
+# - tc2-agent/0001 and go-config/0002: not before the device registers (as managementd and
+#   tc2-hat-attiny aren't); device-register starts them once /etc/salt/minion_id exists.
+# - tc2-agent/0002 and tc2-hat-controller/0002: tc2-hat-i2c counts as started once it owns
+#   org.cacophony.i2c, and tc2-hat-rtc, tc2-hat-attiny and tc2-agent order after it.
+#   Measured on a real device (4 boots each): camera ready 1.0s sooner.
+for unit in tc2-agent cacophony-config-sync; do
+    mkdir -p "/etc/systemd/system/$unit.service.d"
+    printf '[Unit]\nConditionPathExists=/etc/salt/minion_id\n' > "/etc/systemd/system/$unit.service.d/tc2-upstream.conf"
+done
+mkdir -p /etc/systemd/system/tc2-hat-i2c.service.d
+printf '[Service]\nType=dbus\nBusName=org.cacophony.i2c\n' > /etc/systemd/system/tc2-hat-i2c.service.d/tc2-upstream.conf
+for unit in tc2-hat-rtc tc2-hat-attiny tc2-agent; do
+    mkdir -p "/etc/systemd/system/$unit.service.d"
+    printf '[Unit]\nAfter=tc2-hat-i2c.service\nWants=tc2-hat-i2c.service\n' >> "/etc/systemd/system/$unit.service.d/tc2-upstream.conf"
+done
 fi
 
 # managementd runs socket activated (guest/patches/management-interface 0003):
