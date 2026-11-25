@@ -1,0 +1,36 @@
+diff --git a/internal/tc2-hat-i2c/service.go b/internal/tc2-hat-i2c/service.go
+index acd84ec..9587078 100644
+--- a/internal/tc2-hat-i2c/service.go
++++ b/internal/tc2-hat-i2c/service.go
+@@ -38,11 +38,11 @@ func startService() error {
+ 	if err != nil {
+ 		return err
+ 	}
+-	reply, err := conn.RequestName(dbusName, dbus.NameFlagDoNotQueue)
+-	if err != nil {
+-		return err
+-	}
+-	if reply != dbus.RequestNameReplyPrimaryOwner {
++	// Stop here if another instance has the name, before touching the hardware. The name
++	// itself is requested last: the service counts as started (Type=dbus) once it has the
++	// name, and a call before the methods are exported fails.
++	var nameTaken bool
++	if err := conn.BusObject().Call("org.freedesktop.DBus.NameHasOwner", 0, dbusName).Store(&nameTaken); err == nil && nameTaken {
+ 		return errors.New("name already taken")
+ 	}
+ 
+@@ -94,6 +94,14 @@ func startService() error {
+ 
+ 	conn.Export(s, dbusPath, dbusName)
+ 	conn.Export(genIntrospectable(s), dbusPath, "org.freedesktop.DBus.Introspectable")
++
++	reply, err := conn.RequestName(dbusName, dbus.NameFlagDoNotQueue)
++	if err != nil {
++		return err
++	}
++	if reply != dbus.RequestNameReplyPrimaryOwner {
++		return errors.New("name already taken")
++	}
+ 	return nil
+ }
+ 

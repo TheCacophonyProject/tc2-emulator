@@ -154,6 +154,20 @@ done < /tmp/tc2-emu-guest/versions/packages.txt
 # from above, so this is files, models and service enablement.
 /tmp/tc2-emu-guest/salt/apply-salt.sh
 
+# thermal-recorder-py starts as soon as it can: after the root filesystem is writable, not
+# after local-fs.target (active ~8.8s into boot on a Pi Zero 2 W, waiting on the other
+# mounts) and systemd-modules-load, which it doesn't need. Its Python takes ~7.7s to start
+# and the stream from the RP2040 can't be handed to it before then, so in medium power mode
+# the first classification waits on this. It measured 3.6s earlier listening on a device.
+# This is upstream-patches/saltops/0004, which salt would otherwise put back. (A drop-in can't
+# do it: an `After=` reset leaves local-fs.target in the unit's list.) It needs the retry
+# for the system bus in guest/patches/classifier-pipeline/0005, as it can now start before
+# D-Bus does.
+recorder_unit=/etc/systemd/system/thermal-recorder-py.service
+grep -qx 'After=local-fs.target systemd-modules-load.service' "$recorder_unit" ||
+    { echo "$recorder_unit has changed, update the After= change in guest-setup.sh" >&2; exit 1; }
+sed -i 's/^After=local-fs.target systemd-modules-load.service$/After=systemd-remount-fs.service/' "$recorder_unit"
+
 # classifier-pipeline downloads label_paths.json from the main branch of
 # cacophony-web the first time it loads a model, into its working directory, which
 # for the thermal-recorder-py service is /. A device does that itself when it has

@@ -179,7 +179,7 @@ E2E_HOST := http://host.docker.internal
 # The emulated RTC starts at this time of day (UTC; 00:00 is midday in NZ), so the
 # results don't depend on when the tests run.
 E2E_START_TIME ?= 00:00
-E2E_TESTS := new_device_setup rp2040_test_recording config_sync power_mode classify scenes power_cycle
+E2E_TESTS := new_device_setup rp2040_test_recording config_sync power_mode classify scenes medium_power power_cycle
 # cacophony-config-sync waits only 100ms after config changes, rather than 10s.
 # ssh, which the tests use to run commands in the guest, needs the user the container
 # runs as (the host user's id) to be in /etc/passwd.

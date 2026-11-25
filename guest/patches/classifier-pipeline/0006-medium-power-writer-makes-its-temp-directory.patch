@@ -1,0 +1,14 @@
+diff --git a/src/mediumpower/cptvwriter.py b/src/mediumpower/cptvwriter.py
+index 381f6741..e69768eb 100644
+--- a/src/mediumpower/cptvwriter.py
++++ b/src/mediumpower/cptvwriter.py
+@@ -35,6 +35,9 @@ class CPTVWriter:
+         if postprocess:
+             out_dir = out_dir / "postprocess"
+         self.filebase = out_dir / "temp" / f"{formatted_time}.cptv"
++        # Only the high power recorder made this directory, so a device that hasn't run it
++        # (set to medium power straight away) lost its first streamed recording here.
++        self.filebase.parent.mkdir(parents=True, exist_ok=True)
+ 
+         self.f = open(self.filebase, "wb")
+ 

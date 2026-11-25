@@ -357,6 +357,15 @@ and audio recording mode from the web portal to the device and back. It needs th
 credentials after reregistering. The tests share the one device, so `make e2e`
 runs them in turn, `new_device_setup` first (`E2E_TESTS` in the Makefile).
 
+`medium_power` covers medium power mode end to end: the device is set to low power with instant
+classify (and comms, so the classifier runs), its Pi powers off, then the cat scene is played. The
+RP2040 sees the motion, records to its flash and wakes the Pi, streams the recording to tc2-agent as
+it records, which hands it to thermal-recorder-py (`mediumpower`), and the test checks the handoff
+("Client finished streamed recording"), that the classifier comes to a conclusion about the track,
+and that the recording reaches the API. It doesn't check *what* the model predicts (it calls this scene a dog).
+It takes about 160s; `TC2_E2E_ALL_PREDICTIONS=1` also waits until the classifier has had nothing
+more to say for a minute and prints every prediction, for looking into what it makes of a scene.
+
 `classify` checks the on-device classifier: it loads its models (and serves them on
 127.0.0.1:8123) only while comms is enabled, which sets `[thermal-motion]
 run-classifier`, then classifies the test recordings salt installs in

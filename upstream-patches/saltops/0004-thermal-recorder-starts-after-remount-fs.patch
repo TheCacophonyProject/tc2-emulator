@@ -1,0 +1,13 @@
+diff --git a/tc2/thermal-recorder-py/thermal-recorder-py.service b/tc2/thermal-recorder-py/thermal-recorder-py.service
+index 9f970dc..ba7409e 100644
+--- a/tc2/thermal-recorder-py/thermal-recorder-py.service
++++ b/tc2/thermal-recorder-py/thermal-recorder-py.service
+@@ -3,7 +3,7 @@ Description=Cacophony Project Python Thermal Recorder
+ DefaultDependencies=no
+ Wants=network-pre.target
+ Before=network-pre.target
+-After=local-fs.target systemd-modules-load.service
++After=systemd-remount-fs.service
+ 
+ [Service]
+ Type=simple

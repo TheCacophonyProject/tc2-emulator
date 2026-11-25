@@ -1,0 +1,71 @@
+diff --git a/src/piclassifier/attiny.py b/src/piclassifier/attiny.py
+index 36cc1cb3..b8ee439b 100644
+--- a/src/piclassifier/attiny.py
++++ b/src/piclassifier/attiny.py
+@@ -8,8 +8,10 @@ DBUS_PATH = "/org/cacophony/i2c"
+ 
+ 
+ def set_recording_state(is_recording):
+-    bus = dbus.SystemBus(mainloop=DBusGMainLoop())
+     try:
++        # In the try: on a boot where the recorder starts before the system bus is up, this
++        # raised out of PiClassifier's constructor and the classifier process was restarted.
++        bus = dbus.SystemBus(mainloop=DBusGMainLoop())
+         proxy = bus.get_object(DBUS_NAME, DBUS_PATH)
+         state = agent_state(proxy)
+         if state is None:
+diff --git a/src/piclassifier/service.py b/src/piclassifier/service.py
+index 3f22fb16..8d83d641 100644
+--- a/src/piclassifier/service.py
++++ b/src/piclassifier/service.py
+@@ -1,5 +1,6 @@
+ from threading import Thread
+ import logging
++import time
+ import numpy as np
+ import dbus
+ import dbus.service
+@@ -277,6 +278,31 @@ class Service(dbus.service.Object):
+         pass
+ 
+ 
++# The recorder only waits for the root filesystem to start, so on a boot where it gets going
++# early (its imports are quick, or the boot is) the system bus may not be up when it first
++# wants it. Without the retry its D-Bus service is lost for the rest of the run, and test
++# recordings, tracking signals and the like with it.
++BUS_RETRY_SECONDS = 120
++
++
++def connect_to_system_bus(main_loop_class):
++    give_up = time.time() + BUS_RETRY_SECONDS
++    logged = False
++    while True:
++        try:
++            # private so we always get a connection on our main loop, a shared
++            # SystemBus() created earlier (or inherited over fork) without one is
++            # returned as is and the mainloop arg is silently ignored
++            return dbus.SystemBus(mainloop=main_loop_class(), private=True)
++        except dbus.exceptions.DBusException as e:
++            if time.time() > give_up:
++                raise
++            if not logged:
++                logging.info("System bus isn't up yet, retrying: %s", e)
++                logged = True
++            time.sleep(0.5)
++
++
+ class DbusService:
+     def __init__(
+         self,
+@@ -352,10 +378,7 @@ class DbusService:
+         from dbus.mainloop.glib import DBusGMainLoop
+ 
+         try:
+-            # private so we always get a connection on our main loop, a shared
+-            # SystemBus() created earlier (or inherited over fork) without one is
+-            # returned as is and the mainloop arg is silently ignored
+-            session_bus = dbus.SystemBus(mainloop=DBusGMainLoop(), private=True)
++            session_bus = connect_to_system_bus(DBusGMainLoop)
+             name = dbus.service.BusName(DBUS_NAME, session_bus)
+             self.service.start_service(session_bus)
+             self.registered = True

@@ -59,6 +59,31 @@ Each is against the repo's main branch at the time.
   restarted mid-programming, so the next run finds it stopped and never starts it, and rp2040 logs stay
   off until the next boot. It now always starts it afterwards. Reproduced on a device by stopping the
   service, creating `/etc/cacophony/program_rp2040` and restarting tc2-agent. Against v0.12.5, 2026-11-25.
+- `tc2-hat-controller/0003-i2c-service-requests-its-name-after-exporting.patch` (also `guest/patches/tc2-hat-controller/0003`, built
+  into the real-device image and the emulator): tc2-hat-i2c requested `org.cacophony.i2c` first and exported its methods
+  at the end of `startService()`, after opening the bus and pins. With `Type=dbus` (see 0002) systemd counts it
+  started at the name, so tc2-agent's first ATtiny call could arrive before the methods existed, fail, and be
+  retried 2s later (`dbus_attiny_command`), delaying the transfer loop. It now checks `NameHasOwner` first (so a second
+  instance still stops before touching the hardware), exports, then requests the name. On a real device: 0 of 6 boots
+  with agent I2C retries (agent transfer loop at 13.1-13.5s), against retries on 2 of 6 with 0002 alone and 3 of 4 stock
+  (loop at ~15s). Against v0.36.1, 2026-11-25.
+- `saltops/0004-thermal-recorder-starts-after-remount-fs.patch` (the image makes the same edit in `scripts/guest-setup.sh`, since salt
+  would put the unit back): `thermal-recorder-py.service` is ordered after `systemd-remount-fs.service` only, not
+  `local-fs.target systemd-modules-load.service`. local-fs.target is active ~8.8s into boot on a Pi Zero 2 W, and the
+  recorder (7.7s of Python imports before it listens) was started at 9.0s, so the camera stream couldn't be taken before
+  ~17.4s; now it starts at 6.7s and listens at 13.8s on a device (3 boots each, 3.6s earlier). It needs
+  `guest/patches/classifier-pipeline/0005` (below), because the recorder can then reach D-Bus before it's up. Note a drop-in
+  with `After=` does not remove local-fs.target from the unit's list; the unit file has to change. Against dev at 8b8efca.
+- `guest/patches/classifier-pipeline/0005-retry-system-bus-connection.patch` (for upstream too): `DbusService.run_server` connected
+  to the system bus once, and on failure ("Connection refused" if the recorder gets there before dbus.socket) logged
+  "Couldn't run loop" and left the recorder without its D-Bus service for the rest of the run: no test recordings
+  (TakeTestRecording), tracking or recording signals. It now retries every 0.5s for up to 120s. Seen on 1 of 3 boots with
+  saltops/0004; tested on a device with a bus that fails twice then works, and with one that never does (raises at the limit).
+- `guest/patches/classifier-pipeline/0006-medium-power-writer-makes-its-temp-directory.patch` (for upstream too): the medium
+  power `CPTVWriter` opens `/var/spool/cptv/temp/<name>.cptv`, but only the high power `Recorder` creates `temp`
+  (`recorder.py`), so a device set to medium power before the high power recorder has run lost its first streamed
+  recording to `FileNotFoundError` (the recorder logs it as a socket error, the agent doesn't get its "Done" and the
+  recording is offloaded later instead). It now makes the directory. Found by the `medium_power` e2e test on a fresh emulator.
 - `guest/patches/classifier-pipeline/0001-watch-config-before-trusting-the-loaded-copy.patch` (for upstream too; the
   emulator applies it to the installed PyPI package in `scripts/guest-setup.sh`): thermal-recorder-py loads
   `config.toml` at the start of `pi_classify()` but only starts watching it in `piclassify.main`, several seconds of
